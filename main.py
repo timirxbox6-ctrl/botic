@@ -23,8 +23,8 @@ AI_MODEL = "sonar"
 
 # Пути к файлам. Если подключишь Volume на Railway в папку /data,
 # измени эти пути на "/data/users_db.json" и т.д.
-DB_FILE = "users_db.json"
-NICKNAMES_FILE = "nicks.json"
+DB_FILE = "/data/users_db.json"
+NICKNAMES_FILE = "/data/nicks.json"
 # =====================================================================
 
 # Проверка, что ключи загрузились
