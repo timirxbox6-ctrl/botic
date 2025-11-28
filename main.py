@@ -62,19 +62,18 @@ load_data()
 
 async def download_image_as_base64(file_url: str) -> tuple:
     try:
+        logging.info(f"[IMG] Starting download from: {file_url}")
         async with aiohttp.ClientSession() as session:
             async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                logging.info(f"[IMG] Response status: {resp.status}")
                 if resp.status == 200:
                     image_data = await resp.read()
                     
                     size_mb = len(image_data) / (1024 * 1024)
-                    logging.info(f"Image size: {size_mb:.2f} MB")
-                    
-                    if size_mb > 5:
-                        logging.error(f"Image too large: {size_mb:.2f} MB")
-                        return None, None
+                    logging.info(f"[IMG] Downloaded size: {size_mb:.2f} MB ({len(image_data)} bytes)")
                     
                     content_type = resp.headers.get('Content-Type', '').lower()
+                    logging.info(f"[IMG] Content-Type: {content_type}")
                     
                     if 'jpeg' in content_type or 'jpg' in content_type:
                         mime_type = 'image/jpeg'
@@ -90,19 +89,20 @@ async def download_image_as_base64(file_url: str) -> tuple:
                         elif file_url.lower().endswith('.webp'):
                             mime_type = 'image/webp'
                         else:
-                            logging.warning(f"Unknown format: {content_type}, defaulting to jpeg")
+                            logging.warning(f"[IMG] Unknown format: {content_type}, defaulting to jpeg")
                             mime_type = 'image/jpeg'
                     
                     base64_string = base64.b64encode(image_data).decode('utf-8')
                     
-                    logging.info(f"MIME type detected: {mime_type}")
+                    logging.info(f"[IMG] MIME type: {mime_type}")
+                    logging.info(f"[IMG] Base64 length: {len(base64_string)}")
                     
                     return base64_string, mime_type
                 else:
-                    logging.error(f"Failed to download image: {resp.status}")
+                    logging.error(f"[IMG] Failed to download: HTTP {resp.status}")
                     return None, None
     except Exception as e:
-        logging.error(f"Image download error: {e}")
+        logging.error(f"[IMG] Download error: {e}", exc_info=True)
         return None, None
 
 async def ask_perplexity(question: str, image_base64: str = None, mime_type: str = None, is_school_task: bool = False) -> str:
@@ -158,13 +158,13 @@ async def ask_perplexity(question: str, image_base64: str = None, mime_type: str
         
         model = "sonar-pro" if image_base64 else "sonar"
         
-        logging.info(f"Sending request to Perplexity:")
-        logging.info(f"Model: {model}")
-        logging.info(f"Has image: {image_base64 is not None}")
-        logging.info(f"MIME type: {mime_type if image_base64 else 'N/A'}")
+        logging.info(f"[API] Sending request to Perplexity")
+        logging.info(f"[API] Model: {model}")
+        logging.info(f"[API] Has image: {image_base64 is not None}")
+        logging.info(f"[API] MIME type: {mime_type if image_base64 else 'N/A'}")
         if image_base64:
-            logging.info(f"Image data length: {len(image_base64)}")
-        logging.info(f"Question: {question[:100] if question else 'No question'}...")
+            logging.info(f"[API] Image data length: {len(image_base64)}")
+        logging.info(f"[API] Question: {question[:100] if question else 'No question'}...")
         
         payload = {
             "model": model,
@@ -213,16 +213,16 @@ async def ask_perplexity(question: str, image_base64: str = None, mime_type: str
                             return "Слишком много запросов. Попробуй через минуту."
                         else:
                             error_text = await resp.text()
-                            logging.error(f"API error {resp.status}: {error_text}")
+                            logging.error(f"[API] Error {resp.status}: {error_text}")
                             return f"API ошибка {resp.status}. Попробуй позже."
             except asyncio.TimeoutError:
-                logging.warning(f"Timeout attempt {attempt + 1}/3")
+                logging.warning(f"[API] Timeout attempt {attempt + 1}/3")
                 if attempt < 2:
                     await asyncio.sleep(2)
                     continue
                 return "Запрос занял слишком много времени. Попробуй упростить вопрос или попробуй позже."
             except Exception as e:
-                logging.error(f"Perplexity query error on attempt {attempt + 1}: {e}", exc_info=True)
+                logging.error(f"[API] Query error on attempt {attempt + 1}: {e}", exc_info=True)
                 if attempt < 2:
                     await asyncio.sleep(2)
                     continue
@@ -231,7 +231,7 @@ async def ask_perplexity(question: str, image_base64: str = None, mime_type: str
         return "Не удалось получить ответ после 3 попыток."
         
     except Exception as e:
-        logging.error(f"Perplexity query error: {e}", exc_info=True)
+        logging.error(f"[API] Query error: {e}", exc_info=True)
         return "Ошибка при обработке запроса."
 
 async def extract_image_url(text: str) -> str:
@@ -305,6 +305,13 @@ async def main_handler(message: types.Message):
         elif text_lower.startswith('улитка'):
             question = text[6:].strip()
         
+        logging.info(f"[DEBUG] Question: {question}")
+        logging.info(f"[DEBUG] Has photo: {message.photo is not None}")
+        logging.info(f"[DEBUG] Has reply photo: {message.reply_to_message and message.reply_to_message.photo is not None if message.reply_to_message else False}")
+        if message.photo:
+            logging.info(f"[DEBUG] Photo count: {len(message.photo)}")
+            logging.info(f"[DEBUG] Largest photo size: {message.photo[-1].file_size}")
+        
         await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
         
         image_base64 = None
@@ -316,14 +323,21 @@ async def main_handler(message: types.Message):
                 processing_msg = await message.answer("Обрабатываю изображение...")
                 
                 photo = message.photo[-1]
+                logging.info(f"[DEBUG] Getting file for photo_id: {photo.file_id}")
+                
                 file = await bot.get_file(photo.file_id)
                 file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+                
+                logging.info(f"[DEBUG] File URL: {file_url}")
                 
                 image_base64, mime_type = await download_image_as_base64(file_url)
                 
                 if not image_base64:
+                    logging.error(f"[DEBUG] Image download failed!")
                     await processing_msg.edit_text("Ошибка обработки изображения. Попробуй ещё раз.")
                     return
+                
+                logging.info(f"[DEBUG] Image downloaded successfully, mime: {mime_type}")
                 
                 try:
                     await processing_msg.edit_text("бем бем бем...")
@@ -331,7 +345,7 @@ async def main_handler(message: types.Message):
                     pass
                     
             except Exception as e:
-                logging.error(f"Image download error: {e}")
+                logging.error(f"[DEBUG] Image processing exception: {e}", exc_info=True)
                 if processing_msg:
                     await processing_msg.edit_text("Не могу загрузить фото.")
                 else:
@@ -342,6 +356,8 @@ async def main_handler(message: types.Message):
                 processing_msg = await message.answer("Обрабатываю изображение...")
                 
                 photo = message.reply_to_message.photo[-1]
+                logging.info(f"[DEBUG] Getting reply photo file_id: {photo.file_id}")
+                
                 file = await bot.get_file(photo.file_id)
                 file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
                 
@@ -357,7 +373,7 @@ async def main_handler(message: types.Message):
                     pass
                     
             except Exception as e:
-                logging.error(f"Image download error: {e}")
+                logging.error(f"[DEBUG] Reply image error: {e}", exc_info=True)
                 if processing_msg:
                     await processing_msg.edit_text("Не могу загрузить фото.")
                 else:
@@ -380,15 +396,18 @@ async def main_handler(message: types.Message):
                     except:
                         pass
                 except Exception as e:
-                    logging.error(f"URL image download error: {e}")
+                    logging.error(f"[DEBUG] URL image error: {e}", exc_info=True)
                     await message.reply("Не могу загрузить изображение по ссылке.")
                     return
         
         if not question and not image_base64:
+            logging.info(f"[DEBUG] No question and no image, returning")
             return
         
         school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
         is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
+        
+        logging.info(f"[DEBUG] Calling Perplexity - has_image: {image_base64 is not None}, is_school: {is_school}")
         
         answer = await ask_perplexity(question=question, image_base64=image_base64, mime_type=mime_type, is_school_task=is_school)
         
