@@ -60,7 +60,7 @@ def save_nicks():
 
 load_data()
 
-async def ask_perplexity(question: str, image_base64: str = None, is_school_task: bool = False) -> str:
+async def ask_perplexity(question: str, image_url: str = None, is_school_task: bool = False) -> str:
     try:
         headers = {
             "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -91,10 +91,10 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         
         messages = [{"role": "system", "content": system_prompt}]
         
-        if image_base64:
+        if image_url:
             user_text = question if question else "Что на фото? Опиши кратко и реши если это задача."
             user_content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                {"type": "image_url", "image_url": {"url": image_url}},
                 {"type": "text", "text": user_text}
             ]
             messages.append({"role": "user", "content": user_content})
@@ -135,8 +135,8 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
                     answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
                     answer = re.sub(r'\[(\d+)\]', '', answer)
                     
-                    if len(answer) > 524:
-                        answer = answer[:521] + "..."
+                    if len(answer) > 2000:
+                        answer = answer[:1997] + "..."
                     
                     return answer.strip()
                 elif resp.status == 429:
@@ -146,6 +146,31 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
     except Exception as e:
         logging.error(f"Perplexity query error: {e}", exc_info=True)
         return "Ошибка при обработке запроса."
+
+async def download_image_to_base64(url: str) -> str:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    image_data = await resp.read()
+                    return f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
+                else:
+                    logging.error(f"Failed to download image from URL: {url}, status: {resp.status}")
+                    return None
+    except Exception as e:
+        logging.error(f"Error downloading image from URL {url}: {e}")
+        return None
+
+async def extract_image_url(text: str) -> str:
+    url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
+    urls = re.findall(url_pattern, text)
+    
+    image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
+    for url in urls:
+        if url.lower().endswith(image_extensions):
+            return url
+    
+    return None
 
 async def on_startup(dp):
     await bot.delete_my_commands()
@@ -209,7 +234,7 @@ async def main_handler(message: types.Message):
         
         await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
         
-        image_base64 = None
+        image_url = None
         
         if message.photo:
             try:
@@ -221,7 +246,7 @@ async def main_handler(message: types.Message):
                     async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                         if resp.status == 200:
                             image_data = await resp.read()
-                            image_base64 = base64.b64encode(image_data).decode('utf-8')
+                            image_url = f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
             except Exception as e:
                 logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
@@ -236,19 +261,27 @@ async def main_handler(message: types.Message):
                     async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                         if resp.status == 200:
                             image_data = await resp.read()
-                            image_base64 = base64.b64encode(image_data).decode('utf-8')
+                            image_url = f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
             except Exception as e:
                 logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
                 return
         
-        if not question and not image_base64:
+        if not image_url:
+            extracted_url = await extract_image_url(question)
+            if extracted_url:
+                image_url = await download_image_to_base64(extracted_url)
+                if not image_url:
+                    await message.reply("Не могу загрузить изображение по ссылке.")
+                    return
+        
+        if not question and not image_url:
             return
         
         school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
         is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
         
-        answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
+        answer = await ask_perplexity(question=question, image_url=image_url, is_school_task=is_school)
         
         if answer:
             await message.reply(answer, parse_mode=None)
@@ -269,7 +302,7 @@ async def private_handler(message: types.Message):
             
             await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
             
-            image_base64 = None
+            image_url = None
             
             if message.photo:
                 try:
@@ -281,19 +314,27 @@ async def private_handler(message: types.Message):
                         async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                             if resp.status == 200:
                                 image_data = await resp.read()
-                                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                                image_url = f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
                 except Exception as e:
                     logging.error(f"Image download error: {e}")
                     await message.reply("Не могу загрузить фото.")
                     return
             
-            if not question and not image_base64:
+            if not image_url:
+                extracted_url = await extract_image_url(question)
+                if extracted_url:
+                    image_url = await download_image_to_base64(extracted_url)
+                    if not image_url:
+                        await message.reply("Не могу загрузить изображение по ссылке.")
+                        return
+            
+            if not question and not image_url:
                 return
             
             school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
             is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
             
-            answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
+            answer = await ask_perplexity(question=question, image_url=image_url, is_school_task=is_school)
             
             if answer:
                 await message.reply(answer, parse_mode=None)
