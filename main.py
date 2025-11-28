@@ -3,6 +3,7 @@ import aiohttp
 import json
 import os
 import re
+import base64
 from aiogram import Bot, Dispatcher, executor, types
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -72,7 +73,7 @@ def get_display_name(user_obj=None, username=None, uid=None, first_name=None):
 
 load_data()
 
-async def ask_perplexity(text, context="", has_image=False):
+async def ask_perplexity(text, context="", image_data=None):
     url = "https://api.perplexity.ai/chat/completions"
     
     system_prompt = (
@@ -89,16 +90,24 @@ async def ask_perplexity(text, context="", has_image=False):
         "Если извиняются - прощай."
     )
     
-    if has_image:
-        system_prompt += "\nПользователь прикрепил фото. Описывай что видишь кратко и по делу."
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    if image_data:
+        b64_image = base64.b64encode(image_data).decode('utf-8')
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
+            ]
+        })
+    else:
+        messages.append({"role": "user", "content": text})
     
     payload = {
         "model": AI_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": text}
-        ],
-        "temperature": 0.7
+        "messages": messages,
+        "temperature": 0.3
     }
     
     headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
@@ -113,7 +122,28 @@ async def ask_perplexity(text, context="", has_image=False):
                         answer = answer[:521] + "..."
                     return answer
                 return None
-    except: return None
+    except: 
+        return None
+
+async def set_bot_commands():
+    commands = [
+        types.BotCommand(command="ask", description="Задать вопрос боту"),
+        types.BotCommand(command="tip", description="Установить никнейм пользователю"),
+        types.BotCommand(command="all", description="Упомянуть всех участников"),
+        types.BotCommand(command="help", description="Показать справку")
+    ]
+    await bot.set_my_commands(commands)
+
+@dp.message_handler(commands=['start', 'help'])
+async def cmd_help(message: types.Message):
+    help_text = (
+        "Команды:\n"
+        "/ask <вопрос> - задать вопрос (можно с фото)\n"
+        "/tip \"никнейм\" \"@username\" - установить никнейм\n"
+        "/all или /tagall - упомянуть всех\n"
+        "/help - эта справка"
+    )
+    await message.reply(help_text)
 
 @dp.message_handler(content_types=types.ContentTypes.NEW_CHAT_MEMBERS, chat_id=ALLOWED_CHAT_ID)
 async def on_join(message: types.Message):
@@ -170,6 +200,7 @@ async def main_handler(message: types.Message):
             await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
             
             has_photo = message.photo or (message.reply_to_message and message.reply_to_message.photo)
+            image_data = None
             
             if has_photo:
                 if message.photo:
@@ -183,14 +214,9 @@ async def main_handler(message: types.Message):
                 async with aiohttp.ClientSession() as session:
                     async with session.get(file_url) as resp:
                         if resp.status == 200:
-                            photo_data = await resp.read()
-                            
-                            question_with_image = f"{question}\n\n[Пользователь прикрепил изображение для анализа]"
-                            ans = await ask_perplexity(question_with_image, has_image=True)
-                        else:
-                            ans = "Не могу загрузить фото."
-            else:
-                ans = await ask_perplexity(question)
+                            image_data = await resp.read()
+            
+            ans = await ask_perplexity(question, image_data=image_data)
             
             if ans:
                 await message.reply(ans, parse_mode=None)
@@ -206,6 +232,7 @@ async def private_handler(message: types.Message):
                 await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
                 
                 has_photo = message.photo
+                image_data = None
                 
                 if has_photo:
                     photo = message.photo[-1]
@@ -215,16 +242,15 @@ async def private_handler(message: types.Message):
                     async with aiohttp.ClientSession() as session:
                         async with session.get(file_url) as resp:
                             if resp.status == 200:
-                                photo_data = await resp.read()
-                                question_with_image = f"{question}\n\n[Пользователь прикрепил изображение для анализа]"
-                                ans = await ask_perplexity(question_with_image, has_image=True)
-                            else:
-                                ans = "Не могу загрузить фото."
-                else:
-                    ans = await ask_perplexity(question)
+                                image_data = await resp.read()
+                
+                ans = await ask_perplexity(question, image_data=image_data)
                 
                 if ans:
                     await message.reply(ans, parse_mode=None)
 
+async def on_startup(dp):
+    await set_bot_commands()
+
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
