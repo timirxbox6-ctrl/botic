@@ -135,8 +135,8 @@ async def ask_perplexity(question: str, image_url: str = None, is_school_task: b
                     answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
                     answer = re.sub(r'\[(\d+)\]', '', answer)
                     
-                    if len(answer) > 2000:
-                        answer = answer[:1997] + "..."
+                    if len(answer) > 3500:
+                        answer = answer[:3497] + "..."
                     
                     return answer.strip()
                 elif resp.status == 429:
@@ -147,27 +147,13 @@ async def ask_perplexity(question: str, image_url: str = None, is_school_task: b
         logging.error(f"Perplexity query error: {e}", exc_info=True)
         return "Ошибка при обработке запроса."
 
-async def download_image_to_base64(url: str) -> str:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
-                    image_data = await resp.read()
-                    return f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
-                else:
-                    logging.error(f"Failed to download image from URL: {url}, status: {resp.status}")
-                    return None
-    except Exception as e:
-        logging.error(f"Error downloading image from URL {url}: {e}")
-        return None
-
 async def extract_image_url(text: str) -> str:
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
     urls = re.findall(url_pattern, text)
     
-    image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp')
     for url in urls:
-        if url.lower().endswith(image_extensions):
+        url_lower = url.lower()
+        if url_lower.endswith(('.jpg', '.jpeg', '.png')):
             return url
     
     return None
@@ -240,13 +226,7 @@ async def main_handler(message: types.Message):
             try:
                 photo = message.photo[-1]
                 file = await bot.get_file(photo.file_id)
-                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            image_data = await resp.read()
-                            image_url = f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
+                image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
             except Exception as e:
                 logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
@@ -255,13 +235,7 @@ async def main_handler(message: types.Message):
             try:
                 photo = message.reply_to_message.photo[-1]
                 file = await bot.get_file(photo.file_id)
-                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            image_data = await resp.read()
-                            image_url = f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
+                image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
             except Exception as e:
                 logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
@@ -270,10 +244,7 @@ async def main_handler(message: types.Message):
         if not image_url:
             extracted_url = await extract_image_url(question)
             if extracted_url:
-                image_url = await download_image_to_base64(extracted_url)
-                if not image_url:
-                    await message.reply("Не могу загрузить изображение по ссылке.")
-                    return
+                image_url = extracted_url
         
         if not question and not image_url:
             return
@@ -308,13 +279,7 @@ async def private_handler(message: types.Message):
                 try:
                     photo = message.photo[-1]
                     file = await bot.get_file(photo.file_id)
-                    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                    
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                            if resp.status == 200:
-                                image_data = await resp.read()
-                                image_url = f"data:image/jpeg;base64,{base64.b64encode(image_data).decode('utf-8')}"
+                    image_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
                 except Exception as e:
                     logging.error(f"Image download error: {e}")
                     await message.reply("Не могу загрузить фото.")
@@ -323,10 +288,7 @@ async def private_handler(message: types.Message):
             if not image_url:
                 extracted_url = await extract_image_url(question)
                 if extracted_url:
-                    image_url = await download_image_to_base64(extracted_url)
-                    if not image_url:
-                        await message.reply("Не могу загрузить изображение по ссылке.")
-                        return
+                    image_url = extracted_url
             
             if not question and not image_url:
                 return
