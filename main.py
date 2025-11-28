@@ -4,6 +4,7 @@ import json
 import os
 import re
 import base64
+import asyncio
 from aiogram import Bot, Dispatcher, executor, types
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,7 +17,6 @@ except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
 
-AI_MODEL = "sonar-pro"
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
 
@@ -100,12 +100,14 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
         else:
             messages.append({"role": "user", "content": question})
         
+        model = "sonar-pro" if image_data else "sonar"
+        
         payload = {
-            "model": AI_MODEL,
+            "model": model,
             "messages": messages,
             "temperature": 0.2,
             "top_p": 0.8,
-            "max_tokens": 3000,
+            "max_tokens": 2000,
             "search_recency_filter": "month",
             "return_images": False,
             "return_related_questions": False,
@@ -114,34 +116,54 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
             "frequency_penalty": 1
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.perplexity.ai/chat/completions", 
-                                   headers=headers, 
-                                   json=payload, 
-                                   timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    answer = result['choices'][0]['message']['content']
-                    if not answer:
-                        return "Не смог сформулировать ответ. Попробуй переформулировать."
-                    
-                    answer = re.sub(r'\\\[.*?\\\]', '', answer, flags=re.DOTALL)
-                    answer = re.sub(r'\\\(.*?\\\)', '', answer, flags=re.DOTALL)
-                    answer = re.sub(r'\$\$.*?\$\$', '', answer, flags=re.DOTALL)
-                    answer = re.sub(r'\$[^\$]+\$', '', answer)
-                    answer = re.sub(r'\*\*', '', answer)
-                    answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)
-                    answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
-                    answer = re.sub(r'\[(\d+)\]', '', answer)
-                    
-                    if len(answer) > 3500:
-                        answer = answer[:3497] + "..."
-                    
-                    return answer.strip()
-                elif resp.status == 429:
-                    return "Слишком много запросов. Попробуй через минуту."
-                else:
-                    return f"API ошибка {resp.status}. Попробуй позже."
+        for attempt in range(3):
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post("https://api.perplexity.ai/chat/completions", 
+                                           headers=headers, 
+                                           json=payload, 
+                                           timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                        if resp.status == 200:
+                            result = await resp.json()
+                            answer = result['choices'][0]['message']['content']
+                            if not answer:
+                                return "Не смог сформулировать ответ. Попробуй переформулировать."
+                            
+                            answer = re.sub(r'\\\[.*?\\\]', '', answer, flags=re.DOTALL)
+                            answer = re.sub(r'\\\(.*?\\\)', '', answer, flags=re.DOTALL)
+                            answer = re.sub(r'\$\$.*?\$\$', '', answer, flags=re.DOTALL)
+                            answer = re.sub(r'\$[^\$]+\$', '', answer)
+                            answer = re.sub(r'\*\*', '', answer)
+                            answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)
+                            answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
+                            answer = re.sub(r'\[(\d+)\]', '', answer)
+                            
+                            if len(answer) > 3500:
+                                answer = answer[:3497] + "..."
+                            
+                            return answer.strip()
+                        elif resp.status == 429:
+                            if attempt < 2:
+                                await asyncio.sleep(3)
+                                continue
+                            return "Слишком много запросов. Попробуй через минуту."
+                        else:
+                            return f"API ошибка {resp.status}. Попробуй позже."
+            except asyncio.TimeoutError:
+                logging.warning(f"Timeout attempt {attempt + 1}/3")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                return "Запрос занял слишком много времени. Попробуй упростить вопрос или попробуй позже."
+            except Exception as e:
+                logging.error(f"Perplexity query error on attempt {attempt + 1}: {e}", exc_info=True)
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                return "Ошибка при обработке запроса."
+        
+        return "Не удалось получить ответ после 3 попыток."
+        
     except Exception as e:
         logging.error(f"Perplexity query error: {e}", exc_info=True)
         return "Ошибка при обработке запроса."
