@@ -82,23 +82,20 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         
         base_system_prompt = (
             "Твое имя Улитка. "
-            "Стиль: прямой, без слов-паразитов. "
-            "Отвечай кратко, максимум 524 символа. "
-            "На простые вопросы отвечай коротко без подробностей. "
-            "Можешь с юмором если уместно. "
-            "Отвечай ТОЛЬКО чистым текстом без markdown/html. "
-            "Ссылки пиши прямо без скобок (https://...). "
-            "Не используй нумерованные списки 1, 2, 3. "
-            "Не используй звездочки для выделения. "
-            "Не начинай предложения с тире или дефиса. "
-            "Пиши обычным текстом как в Telegram переписке."
-            "Если в вопросе пишут:пошел нахуй,пидр без упоминания ты ,то ты отвечаешь пользователю в такой же манере ,с матами ,только не много текста ,максимум 30 слов тебе дается."
+            "Стиль: прямой, краткий, максимум 524 символа, без лишних подробностей. "
+            "Ссылки вставляй прямо в текст без скобок markdown html. "
+            "Можешь шутить если уместно. "
+            "На вопросы с фото сначала кратко опиши что на изображении затем выполняй указанные действия с фото если они есть. "
+            "Не используй нумерованные списки или звездочки для оформления. "
+            "Пиши ответ обычным телеграм текстом. "
+            "Если формат вопроса грубый отвечай так же жестко но коротко максимум 30 слов. "
+            "Прямые ссылки пиши как есть https://example.com без лишнего форматирования."
         )
         
         if is_school_task:
             system_prompt = base_system_prompt + (
-                " Если попросят решить задачу по математике, физике, химии, биологии - "
-                "найди в интернете аналогичную с решением, проверь что сайт работает в РФ "
+                " Если попросят решить задачу по математике физике химии биологии "
+                "найди в интернете аналогичную с решением проверь что сайт работает в РФ "
                 "и дай прямую ссылку."
             )
         else:
@@ -140,8 +137,10 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
                     if not answer:
                         return "Не смог сформулировать ответ. Попробуй переформулировать."
                     
-                    answer = re.sub(r'\*\*.*?\*\*', '', answer)
-                    answer = re.sub(r'\*.*?\*', '', answer)
+                    answer = re.sub(r'\*\*.*?\*\*', lambda m: m.group(0).replace('**', ''), answer)
+                    answer = re.sub(r'\*', '', answer)
+                    answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)
+                    answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
                     
                     if len(answer) > 524:
                         answer = answer[:521] + "..."
@@ -155,13 +154,8 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         logging.error(f"Perplexity query error: {e}", exc_info=True)
         return "Ошибка при обработке запроса."
 
-async def set_bot_commands():
-    commands = [
-        types.BotCommand(command="ask", description="Задать вопрос боту"),
-        types.BotCommand(command="tip", description="Установить никнейм пользователю"),
-        types.BotCommand(command="all", description="Упомянуть всех участников")
-    ]
-    await bot.set_my_commands(commands)
+async def on_startup(dp):
+    await bot.delete_my_commands()
 
 @dp.message_handler(content_types=types.ContentTypes.NEW_CHAT_MEMBERS, chat_id=ALLOWED_CHAT_ID)
 async def on_join(message: types.Message):
@@ -282,9 +276,6 @@ async def private_handler(message: types.Message):
             
             if answer:
                 await message.reply(answer, parse_mode=None)
-
-async def on_startup(dp):
-    await set_bot_commands()
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
