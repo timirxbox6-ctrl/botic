@@ -204,16 +204,11 @@ async def main_handler(message: types.Message):
         question = text[4:].strip()
         await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
         
-        has_photo = message.photo or (message.reply_to_message and message.reply_to_message.photo)
         image_base64 = None
         
-        if has_photo:
+        if message.photo:
             try:
-                if message.photo:
-                    photo = message.photo[-1]
-                else:
-                    photo = message.reply_to_message.photo[-1]
-                
+                photo = message.photo[-1]
                 file = await bot.get_file(photo.file_id)
                 file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
                 
@@ -222,17 +217,35 @@ async def main_handler(message: types.Message):
                         if resp.status == 200:
                             image_data = await resp.read()
                             image_base64 = base64.b64encode(image_data).decode('utf-8')
+                            logging.info(f"Loaded image: {len(image_data)} bytes")
+            except Exception as e:
+                logging.error(f"Image download error: {e}")
+                await message.reply("Не могу загрузить фото.")
+                return
+        elif message.reply_to_message and message.reply_to_message.photo:
+            try:
+                photo = message.reply_to_message.photo[-1]
+                file = await bot.get_file(photo.file_id)
+                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+                
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                        if resp.status == 200:
+                            image_data = await resp.read()
+                            image_base64 = base64.b64encode(image_data).decode('utf-8')
+                            logging.info(f"Loaded replied image: {len(image_data)} bytes")
             except Exception as e:
                 logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
                 return
         
         if not question and not image_base64:
-            await message.reply("Напиши вопрос после /ask или прикрепи фото.")
             return
         
         school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
         is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
+        
+        logging.info(f"Processing: question='{question}', has_image={bool(image_base64)}, is_school={is_school}")
         
         answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
         
@@ -248,10 +261,9 @@ async def private_handler(message: types.Message):
             question = text[4:].strip()
             await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
             
-            has_photo = message.photo
             image_base64 = None
             
-            if has_photo:
+            if message.photo:
                 try:
                     photo = message.photo[-1]
                     file = await bot.get_file(photo.file_id)
@@ -268,7 +280,6 @@ async def private_handler(message: types.Message):
                     return
             
             if not question and not image_base64:
-                await message.reply("Напиши вопрос после /ask или прикрепи фото.")
                 return
             
             school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
