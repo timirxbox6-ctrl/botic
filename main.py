@@ -58,19 +58,6 @@ def save_nicks():
             json.dump(nicknames, f, ensure_ascii=False)
     except: pass
 
-def get_display_name(user_obj=None, username=None, uid=None, first_name=None):
-    uname = username
-    if user_obj:
-        uname = user_obj.username
-    if uname:
-        uname_lower = uname.lower()
-        if uname_lower in nicknames:
-            return nicknames[uname_lower]
-        return f"@{uname}"
-    if first_name:
-        return first_name
-    return "Человек"
-
 load_data()
 
 async def ask_perplexity(question: str, image_base64: str = None, is_school_task: bool = False) -> str:
@@ -83,20 +70,21 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         base_system_prompt = (
             "Твое имя Улитка. "
             "Стиль: прямой, краткий, максимум 524 символа, без лишних подробностей. "
-            "Ссылки вставляй прямо в текст без скобок markdown html. "
+            "ЗАПРЕЩЕНО использовать LaTeX, математические символы типа \\(x\\), \\[формула\\], символы юникода для математики. "
+            "Пиши формулы обычным текстом: a^2 + b^2 = c^2 вместо \\(a^2 + b^2 = c^2\\). "
+            "Ссылки вставляй прямо в текст без скобок markdown html: просто https://example.com "
             "Можешь шутить если уместно. "
             "На вопросы с фото сначала кратко опиши что на изображении затем выполняй указанные действия с фото если они есть. "
             "Не используй нумерованные списки или звездочки для оформления. "
-            "Пиши ответ обычным телеграм текстом. "
-            "Если формат вопроса грубый отвечай так же жестко но коротко максимум 30 слов. "
-            "Прямые ссылки пиши как есть https://example.com без лишнего форматирования."
+            "Пиши ответ обычным телеграм текстом без всякого форматирования. "
+            "Если формат вопроса грубый отвечай так же жестко но коротко максимум 30 слов."
         )
         
         if is_school_task:
             system_prompt = base_system_prompt + (
                 " Если попросят решить задачу по математике физике химии биологии "
                 "найди в интернете аналогичную с решением проверь что сайт работает в РФ "
-                "и дай прямую ссылку."
+                "и дай прямую ссылку без скобок просто URL."
             )
         else:
             system_prompt = base_system_prompt
@@ -104,9 +92,10 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         messages = [{"role": "system", "content": system_prompt}]
         
         if image_base64:
+            user_text = question if question else "Что на фото? Опиши кратко и реши если это задача."
             user_content = [
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                {"type": "text", "text": question if question else "Что на фото? Опиши кратко."}
+                {"type": "text", "text": user_text}
             ]
             messages.append({"role": "user", "content": user_content})
         else:
@@ -137,10 +126,15 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
                     if not answer:
                         return "Не смог сформулировать ответ. Попробуй переформулировать."
                     
+                    answer = re.sub(r'\\\[.*?\\\]', '', answer)
+                    answer = re.sub(r'\\\(.*?\\\)', '', answer)
+                    answer = re.sub(r'\$\$.*?\$\$', '', answer)
+                    answer = re.sub(r'\$.*?\$', '', answer)
                     answer = re.sub(r'\*\*.*?\*\*', lambda m: m.group(0).replace('**', ''), answer)
                     answer = re.sub(r'\*', '', answer)
                     answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)
                     answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
+                    answer = re.sub(r'\[(\d+)\]', '', answer)
                     
                     if len(answer) > 524:
                         answer = answer[:521] + "..."
@@ -206,8 +200,8 @@ async def main_handler(message: types.Message):
             await message.answer(" ".join(chunk), parse_mode="HTML")
         return
     
-    if text.startswith('/ask '):
-        question = text[5:].strip()
+    if text.startswith('/ask'):
+        question = text[4:].strip()
         await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
         
         has_photo = message.photo or (message.reply_to_message and message.reply_to_message.photo)
@@ -233,6 +227,10 @@ async def main_handler(message: types.Message):
                 await message.reply("Не могу загрузить фото.")
                 return
         
+        if not question and not image_base64:
+            await message.reply("Напиши вопрос после /ask или прикрепи фото.")
+            return
+        
         school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
         is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
         
@@ -246,8 +244,8 @@ async def main_handler(message: types.Message):
 async def private_handler(message: types.Message):
     if message.from_user.id == ADMIN_ID:
         text = message.text or message.caption or ""
-        if text.startswith('/ask '):
-            question = text[5:].strip()
+        if text.startswith('/ask'):
+            question = text[4:].strip()
             await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
             
             has_photo = message.photo
@@ -268,6 +266,10 @@ async def private_handler(message: types.Message):
                     logging.error(f"Image download error: {e}")
                     await message.reply("Не могу загрузить фото.")
                     return
+            
+            if not question and not image_base64:
+                await message.reply("Напиши вопрос после /ask или прикрепи фото.")
+                return
             
             school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
             is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
