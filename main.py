@@ -1,307 +1,262 @@
-import logging
-import aiohttp
-import json
 import os
+import json
 import re
-import base64
-from aiogram import Bot, Dispatcher, executor, types
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import Message, FSInputFile
+import aiohttp
+from pathlib import Path
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID"))
 
-try:
-    ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-    ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID", "0"))
-except ValueError:
-    logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
-    exit(1)
+DATA_DIR = Path("data")
+DATA_DIR.mkdir(exist_ok=True)
+USERS_DB = DATA_DIR / "users_db.json"
+NICKS_DB = DATA_DIR / "nicks.json"
 
-AI_MODEL = "sonar-pro"
-DB_FILE = "/data/users_db.json"
-NICKNAMES_FILE = "/data/nicks.json"
-
-if not BOT_TOKEN or not PERPLEXITY_API_KEY:
-    logging.error("ОШИБКА: Не найдены BOT_TOKEN или PERPLEXITY_API_KEY в переменных окружения!")
-    exit(1)
-
-logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
-known_users = set()
-nicknames = {}
+dp = Dispatcher()
 
-def load_data():
-    global known_users, nicknames
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                known_users = set(tuple(x) for x in data)
-        except:
-            known_users = set()
-    if os.path.exists(NICKNAMES_FILE):
-        try:
-            with open(NICKNAMES_FILE, "r", encoding="utf-8") as f:
-                nicknames = json.load(f)
-        except:
-            nicknames = {}
+def load_json(path):
+    if path.exists():
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
 
-def save_users():
-    try:
-        with open(DB_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(known_users), f, ensure_ascii=False)
-    except: pass
+def save_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-def save_nicks():
-    try:
-        with open(NICKNAMES_FILE, "w", encoding="utf-8") as f:
-            json.dump(nicknames, f, ensure_ascii=False)
-    except: pass
+def save_user(user_id, username, first_name):
+    users = load_json(USERS_DB)
+    users[str(user_id)] = {
+        "id": user_id,
+        "username": username,
+        "first_name": first_name
+    }
+    save_json(USERS_DB, users)
 
-load_data()
+def get_nickname(username):
+    nicks = load_json(NICKS_DB)
+    return nicks.get(username, f"@{username}")
 
-async def ask_perplexity(question: str, image_base64: str = None, is_school_task: bool = False) -> str:
-    try:
-        headers = {
-            "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        base_system_prompt = (
-            "Твое имя Улитка. "
-            "Отвечай прямо на вопрос без лишнего текста максимум 524 символа. "
-            "ЗАПРЕЩЕНО писать что ты думаешь или объяснять процесс размышления. "
-            "СТРОГО ЗАПРЕЩЕНО использовать LaTeX, математические символы типа \\(x\\), \\[формула\\], $x$, $$формула$$. "
-            "Формулы пиши красиво обычными символами Unicode: используй ², ³ для степеней, √ для корня. "
-            "Например: c² = a² + b², D = b² − 4ac, x = (−b ± √D) / 2a "
-            "Ссылки вставляй прямо в текст без скобок просто https://example.com "
-            "На вопросы с фото сразу отвечай кратко без длинных описаний. "
-            "Не используй нумерованные списки или звездочки для оформления. "
-            "Пиши ответ обычным телеграм текстом красиво и понятно. "
-            "Если формат вопроса грубый отвечай так же жестко но коротко максимум 30 слов."
-        )
-        
-        if is_school_task:
-            system_prompt = base_system_prompt + (
-                " Если попросят решить задачу по математике физике химии биологии "
-                "найди в интернете аналогичную с решением проверь что сайт работает в РФ "
-                "и дай прямую ссылку без скобок просто URL."
-            )
-        else:
-            system_prompt = base_system_prompt
-        
-        messages = [{"role": "system", "content": system_prompt}]
-        
-        if image_base64:
-            if not question or len(question.strip()) < 10:
-                user_text = "Реши задачу на этом фото. Напиши решение кратко."
-            else:
-                user_text = question
-            
-            user_content = [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                {"type": "text", "text": user_text}
+def set_nickname(username, nickname):
+    nicks = load_json(NICKS_DB)
+    nicks[username] = nickname
+    save_json(NICKS_DB, nicks)
+
+async def download_photo(photo):
+    file = await bot.get_file(photo.file_id)
+    file_path = file.file_path
+    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            return await resp.read()
+
+async def ask_perplexity(question, image_data=None):
+    url = "https://api.perplexity.ai/chat/completions"
+    
+    system_prompt = """Ты Улитка. Отвечай коротко и по делу, максимум 300 символов. Пиши как человек обычным языком. НИКОГДА не используй LaTeX, формулы, скобки с символами, знаки доллара. Используй только обычные Unicode символы: ², ³, √, ×, ÷, ≈, ≤, ≥. Не используй списки, цифры в начале строк, звездочки, тире для перечисления. Пиши всё одним текстом. Если в вопросе мат - отвечай в таком же тоне коротко. Для школьных задач давай прямые ссылки на решения без скобок."""
+    
+    messages = [
+        {"role": "system", "content": system_prompt}
+    ]
+    
+    if image_data:
+        import base64
+        b64_image = base64.b64encode(image_data).decode('utf-8')
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": question},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
             ]
-            messages.append({"role": "user", "content": user_content})
-        else:
-            messages.append({"role": "user", "content": question})
-        
-        payload = {
-            "model": AI_MODEL,
-            "messages": messages,
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "max_tokens": 4000,
-            "search_recency_filter": "month",
-            "return_images": False,
-            "return_related_questions": False,
-            "stream": False,
-            "presence_penalty": 0,
-            "frequency_penalty": 1
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post("https://api.perplexity.ai/chat/completions", 
-                                   headers=headers, 
-                                   json=payload, 
-                                   timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    answer = result['choices'][0]['message']['content']
-                    if not answer:
-                        return "Не смог сформулировать ответ. Попробуй переформулировать."
-                    
-                    answer = re.sub(r'\\\[.*?\\\]', '', answer, flags=re.DOTALL)
-                    answer = re.sub(r'\\\(.*?\\\)', '', answer, flags=re.DOTALL)
-                    answer = re.sub(r'\$\$.*?\$\$', '', answer, flags=re.DOTALL)
-                    answer = re.sub(r'\$[^\$]+\$', '', answer)
-                    answer = re.sub(r'\*\*', '', answer)
-                    answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)
-                    answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
-                    answer = re.sub(r'\[(\d+)\]', '', answer)
-                    
-                    if len(answer) > 524:
-                        answer = answer[:521] + "..."
-                    
-                    return answer.strip()
-                elif resp.status == 429:
-                    return "Слишком много запросов. Попробуй через минуту."
-                else:
-                    return f"API ошибка {resp.status}. Попробуй позже."
-    except Exception as e:
-        logging.error(f"Perplexity query error: {e}", exc_info=True)
-        return "Ошибка при обработке запроса."
-
-async def on_startup(dp):
-    await bot.delete_my_commands()
-
-@dp.message_handler(content_types=types.ContentTypes.NEW_CHAT_MEMBERS, chat_id=ALLOWED_CHAT_ID)
-async def on_join(message: types.Message):
-    for u in message.new_chat_members:
-        if not u.is_bot:
-            udata = (u.id, u.username, u.first_name)
-            known_users.discard(next((x for x in known_users if x[0] == u.id), None))
-            known_users.add(udata)
-            save_users()
-
-@dp.message_handler(content_types=types.ContentTypes.ANY, chat_id=ALLOWED_CHAT_ID)
-async def main_handler(message: types.Message):
-    if not message.from_user.is_bot:
-        u = message.from_user
-        udata = (u.id, u.username, u.first_name)
-        if udata not in known_users:
-            known_users.discard(next((x for x in known_users if x[0] == u.id), None))
-            known_users.add(udata)
-            save_users()
+        })
+    else:
+        messages.append({"role": "user", "content": question})
     
-    text = (message.text or message.caption or "").strip()
+    headers = {
+        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": "sonar-pro",
+        "messages": messages,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "max_tokens": 800,
+        "search_recency_filter": "month",
+        "return_images": False,
+        "return_related_questions": False,
+        "stream": False
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            result = await resp.json()
+            return result["choices"][0]["message"]["content"]
+
+def clean_response(text):
+    text = re.sub(r'\\\[.*?\\\]', '', text)
+    text = re.sub(r'\\\(.*?\\\)', '', text)
+    text = re.sub(r'\$\$.*?\$\$', '', text)
+    text = re.sub(r'\$.*?\$', '', text)
+    text = re.sub(r'\[\d+\]', '', text)
+    text = re.sub(r'^[\d\-\*•]\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\n+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    if len(text) > 300:
+        text = text[:297] + "..."
+    
+    return text
+
+def is_school_task(text):
+    keywords = ["реши", "решить", "задача", "пример", "уравнение", "формула", "теорема"]
     text_lower = text.lower()
-    
-    if text.startswith('/tip'):
-        args = re.findall(r'"([^"]*)"', text)
-        if len(args) == 2:
-            nickname = args[0]
-            target_username = args[1].replace('@', '').strip()
-            if target_username:
-                nicknames[target_username.lower()] = nickname
-                save_nicks()
-                await message.reply(f"Запомнил, @{target_username} теперь {nickname}.")
-        return
-    
-    if text.startswith('/all') or text.startswith('/tagall'):
-        if not known_users:
-            await message.reply("Пусто.")
-            return
-        mentions = []
-        for uid, uname, fname in known_users:
-            if uname:
-                mentions.append(f"@{uname}")
-            else:
-                mentions.append(f"{fname}")
-        chunk_size = 30
-        chunks = [mentions[i:i+chunk_size] for i in range(0, len(mentions), chunk_size)]
-        await message.answer("Общий сбор:")
-        for chunk in chunks:
-            await message.answer(" ".join(chunk), parse_mode="HTML")
-        return
-    
-    if text.startswith('/ask') or text_lower.startswith('улитка'):
-        question = text
-        if text.startswith('/ask'):
-            question = text[4:].strip()
-        elif text_lower.startswith('улитка'):
-            question = text[6:].strip()
-        
-        await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
-        
-        image_base64 = None
-        
-        if message.photo:
-            try:
-                photo = message.photo[-1]
-                file = await bot.get_file(photo.file_id)
-                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            image_data = await resp.read()
-                            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            except Exception as e:
-                logging.error(f"Image download error: {e}")
-                await message.reply("Не могу загрузить фото.")
-                return
-        elif message.reply_to_message and message.reply_to_message.photo:
-            try:
-                photo = message.reply_to_message.photo[-1]
-                file = await bot.get_file(photo.file_id)
-                file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                        if resp.status == 200:
-                            image_data = await resp.read()
-                            image_base64 = base64.b64encode(image_data).decode('utf-8')
-            except Exception as e:
-                logging.error(f"Image download error: {e}")
-                await message.reply("Не могу загрузить фото.")
-                return
-        
-        if not question and not image_base64:
-            return
-        
-        school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
-        is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
-        
-        answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
-        
-        if answer:
-            await message.reply(answer, parse_mode=None)
-        return
+    return any(kw in text_lower for kw in keywords)
 
-@dp.message_handler(chat_type=types.ChatType.PRIVATE)
-async def private_handler(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        text = (message.text or message.caption or "").strip()
-        text_lower = text.lower()
-        
-        if text.startswith('/ask') or text_lower.startswith('улитка'):
-            question = text
-            if text.startswith('/ask'):
-                question = text[4:].strip()
-            elif text_lower.startswith('улитка'):
-                question = text[6:].strip()
-            
-            await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
-            
-            image_base64 = None
-            
-            if message.photo:
-                try:
-                    photo = message.photo[-1]
-                    file = await bot.get_file(photo.file_id)
-                    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                    
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                            if resp.status == 200:
-                                image_data = await resp.read()
-                                image_base64 = base64.b64encode(image_data).decode('utf-8')
-                except Exception as e:
-                    logging.error(f"Image download error: {e}")
-                    await message.reply("Не могу загрузить фото.")
-                    return
-            
-            if not question and not image_base64:
-                return
-            
-            school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
-            is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
-            
-            answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
-            
-            if answer:
-                await message.reply(answer, parse_mode=None)
+@dp.message(F.new_chat_members)
+async def new_member(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID:
+        return
+    
+    for user in message.new_chat_members:
+        save_user(user.id, user.username, user.first_name)
 
-if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
+@dp.message(Command("tip"))
+async def set_tip(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID and message.from_user.id != ADMIN_ID:
+        return
+    
+    save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
+    text = message.text
+    match = re.search(r'/tip\s+"([^"]+)"\s+"@([^"]+)"', text)
+    
+    if not match:
+        await message.reply("Формат: /tip \"никнейм\" \"@username\"")
+        return
+    
+    nickname = match.group(1)
+    username = match.group(2)
+    
+    set_nickname(username, nickname)
+    await message.reply(f"Никнейм установлен: {nickname} для @{username}")
+
+@dp.message(Command("all", "tagall"))
+async def tag_all(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID and message.from_user.id != ADMIN_ID:
+        return
+    
+    save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
+    users = load_json(USERS_DB)
+    mentions = []
+    
+    for user_data in users.values():
+        username = user_data.get("username")
+        if username:
+            mentions.append(get_nickname(username))
+    
+    chunks = [mentions[i:i+30] for i in range(0, len(mentions), 30)]
+    
+    for chunk in chunks:
+        await message.reply(" ".join(chunk))
+
+@dp.message(Command("ask"))
+async def ask_command(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID and message.from_user.id != ADMIN_ID:
+        return
+    
+    save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
+    question = message.text.replace("/ask", "").strip()
+    
+    if not question:
+        await message.reply("Задай вопрос после команды")
+        return
+    
+    image_data = None
+    
+    if message.photo:
+        photo = message.photo[-1]
+        image_data = await download_photo(photo)
+        
+        if len(question) < 10:
+            question = "Реши задачу на фото"
+    
+    if message.reply_to_message and message.reply_to_message.photo and not image_data:
+        photo = message.reply_to_message.photo[-1]
+        image_data = await download_photo(photo)
+        
+        if len(question) < 10:
+            question = "Реши задачу на фото"
+    
+    if is_school_task(question):
+        question = f"{question}. Дай ссылку на решение."
+    
+    try:
+        answer = await ask_perplexity(question, image_data)
+        clean_answer = clean_response(answer)
+        await message.reply(clean_answer)
+    except Exception as e:
+        await message.reply("Ошибка при обработке запроса")
+
+@dp.message(F.text.startswith("улитка"))
+async def snail_ask(message: Message):
+    if message.chat.id != ALLOWED_CHAT_ID and message.from_user.id != ADMIN_ID:
+        return
+    
+    save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    
+    question = message.text.replace("улитка", "").strip()
+    
+    if not question:
+        await message.reply("Задай вопрос")
+        return
+    
+    image_data = None
+    
+    if message.photo:
+        photo = message.photo[-1]
+        image_data = await download_photo(photo)
+        
+        if len(question) < 10:
+            question = "Реши задачу на фото"
+    
+    if message.reply_to_message and message.reply_to_message.photo and not image_data:
+        photo = message.reply_to_message.photo[-1]
+        image_data = await download_photo(photo)
+        
+        if len(question) < 10:
+            question = "Реши задачу на фото"
+    
+    if is_school_task(question):
+        question = f"{question}. Дай ссылку на решение."
+    
+    try:
+        answer = await ask_perplexity(question, image_data)
+        clean_answer = clean_response(answer)
+        await message.reply(clean_answer)
+    except Exception as e:
+        await message.reply("Ошибка при обработке запроса")
+
+@dp.message()
+async def save_users(message: Message):
+    if message.chat.id == ALLOWED_CHAT_ID:
+        save_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+
+async def main():
+    await bot.delete_my_commands()
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
