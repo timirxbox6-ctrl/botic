@@ -73,77 +73,94 @@ def get_display_name(user_obj=None, username=None, uid=None, first_name=None):
 
 load_data()
 
-async def ask_perplexity(text, context="", image_data=None):
-    url = "https://api.perplexity.ai/chat/completions"
-    
-    system_prompt = (
-        f"Твое имя Улитка. {context}\n"
-        "Стиль: прямой, без слов-паразитов. "
-        "Отвечай кратко, максимум 524 символа. "
-        "На простые вопросы отвечай коротко без подробностей. "
-        "Можешь с юмором если уместно. "
-        "Отвечай ТОЛЬКО чистым текстом без markdown/html. "
-        "Ссылки пиши прямо без скобок (https://...). "
-        "Если попросят решить задачу по математике, физике - найди в интернете аналогичную с решением, "
-        "проверь что сайт работает в РФ и дай прямую ссылку. "
-        "Если грубят - отвечай агрессивно матом. "
-        "Если извиняются - прощай."
-    )
-    
-    messages = [{"role": "system", "content": system_prompt}]
-    
-    if image_data:
-        b64_image = base64.b64encode(image_data).decode('utf-8')
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "text", "text": text},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}}
-            ]
-        })
-    else:
-        messages.append({"role": "user", "content": text})
-    
-    payload = {
-        "model": AI_MODEL,
-        "messages": messages,
-        "temperature": 0.3
-    }
-    
-    headers = {"Authorization": f"Bearer {PERPLEXITY_API_KEY}", "Content-Type": "application/json"}
-    
+async def ask_perplexity(question: str, image_base64: str = None, is_school_task: bool = False) -> str:
     try:
+        headers = {
+            "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        base_system_prompt = (
+            "Твое имя Улитка. "
+            "Стиль: прямой, без слов-паразитов. "
+            "Отвечай кратко, максимум 524 символа. "
+            "На простые вопросы отвечай коротко без подробностей. "
+            "Можешь с юмором если уместно. "
+            "Отвечай ТОЛЬКО чистым текстом без markdown/html. "
+            "Ссылки пиши прямо без скобок (https://...). "
+            "Не используй нумерованные списки 1, 2, 3. "
+            "Не используй звездочки для выделения. "
+            "Не начинай предложения с тире или дефиса. "
+            "Пиши обычным текстом как в Telegram переписке."
+        )
+        
+        if is_school_task:
+            system_prompt = base_system_prompt + (
+                " Если попросят решить задачу по математике, физике, химии, биологии - "
+                "найди в интернете аналогичную с решением, проверь что сайт работает в РФ "
+                "и дай прямую ссылку."
+            )
+        else:
+            system_prompt = base_system_prompt
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        if image_base64:
+            user_content = [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                {"type": "text", "text": question if question else "Что на фото? Опиши кратко."}
+            ]
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": question})
+        
+        payload = {
+            "model": AI_MODEL,
+            "messages": messages,
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_tokens": 4000,
+            "search_recency_filter": "month",
+            "return_images": False,
+            "return_related_questions": False,
+            "stream": False,
+            "presence_penalty": 0,
+            "frequency_penalty": 1
+        }
+        
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
+            async with session.post("https://api.perplexity.ai/chat/completions", 
+                                   headers=headers, 
+                                   json=payload, 
+                                   timeout=aiohttp.ClientTimeout(total=60)) as resp:
                 if resp.status == 200:
-                    res = await resp.json()
-                    answer = res['choices'][0]['message']['content']
+                    result = await resp.json()
+                    answer = result['choices'][0]['message']['content']
+                    if not answer:
+                        return "Не смог сформулировать ответ. Попробуй переформулировать."
+                    
+                    answer = re.sub(r'\*\*.*?\*\*', '', answer)
+                    answer = re.sub(r'\*.*?\*', '', answer)
+                    
                     if len(answer) > 524:
                         answer = answer[:521] + "..."
-                    return answer
-                return None
-    except: 
-        return None
+                    
+                    return answer.strip()
+                elif resp.status == 429:
+                    return "Слишком много запросов. Попробуй через минуту."
+                else:
+                    return f"API ошибка {resp.status}. Попробуй позже."
+    except Exception as e:
+        logging.error(f"Perplexity query error: {e}", exc_info=True)
+        return "Ошибка при обработке запроса."
 
 async def set_bot_commands():
     commands = [
         types.BotCommand(command="ask", description="Задать вопрос боту"),
         types.BotCommand(command="tip", description="Установить никнейм пользователю"),
-        types.BotCommand(command="all", description="Упомянуть всех участников"),
-        types.BotCommand(command="help", description="Показать справку")
+        types.BotCommand(command="all", description="Упомянуть всех участников")
     ]
     await bot.set_my_commands(commands)
-
-@dp.message_handler(commands=['start', 'help'])
-async def cmd_help(message: types.Message):
-    help_text = (
-        "Команды:\n"
-        "/ask <вопрос> - задать вопрос (можно с фото)\n"
-        "/tip \"никнейм\" \"@username\" - установить никнейм\n"
-        "/all или /tagall - упомянуть всех\n"
-        "/help - эта справка"
-    )
-    await message.reply(help_text)
 
 @dp.message_handler(content_types=types.ContentTypes.NEW_CHAT_MEMBERS, chat_id=ALLOWED_CHAT_ID)
 async def on_join(message: types.Message):
@@ -196,13 +213,13 @@ async def main_handler(message: types.Message):
     
     if text.startswith('/ask '):
         question = text[5:].strip()
-        if question:
-            await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
-            
-            has_photo = message.photo or (message.reply_to_message and message.reply_to_message.photo)
-            image_data = None
-            
-            if has_photo:
+        await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
+        
+        has_photo = message.photo or (message.reply_to_message and message.reply_to_message.photo)
+        image_base64 = None
+        
+        if has_photo:
+            try:
                 if message.photo:
                     photo = message.photo[-1]
                 else:
@@ -212,14 +229,22 @@ async def main_handler(message: types.Message):
                 file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
                 
                 async with aiohttp.ClientSession() as session:
-                    async with session.get(file_url) as resp:
+                    async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                         if resp.status == 200:
                             image_data = await resp.read()
-            
-            ans = await ask_perplexity(question, image_data=image_data)
-            
-            if ans:
-                await message.reply(ans, parse_mode=None)
+                            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            except Exception as e:
+                logging.error(f"Image download error: {e}")
+                await message.reply("Не могу загрузить фото.")
+                return
+        
+        school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
+        is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
+        
+        answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
+        
+        if answer:
+            await message.reply(answer, parse_mode=None)
         return
 
 @dp.message_handler(chat_type=types.ChatType.PRIVATE)
@@ -228,26 +253,34 @@ async def private_handler(message: types.Message):
         text = message.text or message.caption or ""
         if text.startswith('/ask '):
             question = text[5:].strip()
-            if question:
-                await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
-                
-                has_photo = message.photo
-                image_data = None
-                
-                if has_photo:
+            await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
+            
+            has_photo = message.photo
+            image_base64 = None
+            
+            if has_photo:
+                try:
                     photo = message.photo[-1]
                     file = await bot.get_file(photo.file_id)
                     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
                     
                     async with aiohttp.ClientSession() as session:
-                        async with session.get(file_url) as resp:
+                        async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                             if resp.status == 200:
                                 image_data = await resp.read()
-                
-                ans = await ask_perplexity(question, image_data=image_data)
-                
-                if ans:
-                    await message.reply(ans, parse_mode=None)
+                                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                except Exception as e:
+                    logging.error(f"Image download error: {e}")
+                    await message.reply("Не могу загрузить фото.")
+                    return
+            
+            school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
+            is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
+            
+            answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
+            
+            if answer:
+                await message.reply(answer, parse_mode=None)
 
 async def on_startup(dp):
     await set_bot_commands()
