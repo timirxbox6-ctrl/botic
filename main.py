@@ -16,7 +16,7 @@ except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
 
-AI_MODEL = "sonar"
+AI_MODEL = "sonar-pro"
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
 
@@ -93,7 +93,11 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         messages = [{"role": "system", "content": system_prompt}]
         
         if image_base64:
-            user_text = question if question else "Что на фото? Опиши кратко."
+            if not question or len(question.strip()) < 10:
+                user_text = "Реши задачу на этом фото. Напиши решение кратко."
+            else:
+                user_text = question
+            
             user_content = [
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                 {"type": "text", "text": user_text}
