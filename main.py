@@ -4,6 +4,7 @@ import json
 import os
 import re
 import asyncio
+import base64
 from aiogram import Bot, Dispatcher, executor, types
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -59,7 +60,12 @@ def save_nicks():
 
 load_data()
 
-async def ask_perplexity(question: str, is_school_task: bool = False) -> str:
+async def download_photo(file_id: str) -> bytes:
+    file = await bot.get_file(file_id)
+    photo_bytes = await bot.download_file(file.file_path)
+    return photo_bytes.read()
+
+async def ask_perplexity(question: str, is_school_task: bool = False, photo_base64: str = None) -> str:
     try:
         headers = {
             "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -86,16 +92,36 @@ async def ask_perplexity(question: str, is_school_task: bool = False) -> str:
         else:
             system_prompt = base_system_prompt
         
+        model = "sonar-pro" if photo_base64 else "sonar"
+        
         messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": question}
+            {"role": "system", "content": system_prompt}
         ]
         
-        logging.info(f"Sending request to Perplexity")
+        if photo_base64:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{photo_base64}"
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": question
+                    }
+                ]
+            })
+        else:
+            messages.append({"role": "user", "content": question})
+        
+        logging.info(f"Sending request to Perplexity with model: {model}")
         logging.info(f"Question: {question[:100]}...")
         
         payload = {
-            "model": "sonar",
+            "model": model,
             "messages": messages,
             "temperature": 0.2,
             "top_p": 0.9,
@@ -222,15 +248,33 @@ async def main_handler(message: types.Message):
         elif text_lower.startswith('улитка'):
             question = text[6:].strip()
         
-        if not question:
+        photo_base64 = None
+        if message.photo:
+            photo = message.photo[-1]
+            if photo.file_size > 20 * 1024 * 1024:
+                await message.reply("Фото слишком большое. Максимум 20 МБ.")
+                return
+            
+            try:
+                photo_bytes = await download_photo(photo.file_id)
+                photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
+            except Exception as e:
+                logging.error(f"Photo download error: {e}")
+                await message.reply("Ошибка при загрузке фото.")
+                return
+        
+        if not question and not photo_base64:
             return
+        
+        if photo_base64 and not question:
+            question = "Реши эту задачу"
         
         await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
         
         school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
-        is_school = any(keyword in question.lower() for keyword in school_keywords)
+        is_school = any(keyword in question.lower() for keyword in school_keywords) or photo_base64
         
-        answer = await ask_perplexity(question=question, is_school_task=is_school)
+        answer = await ask_perplexity(question=question, is_school_task=is_school, photo_base64=photo_base64)
         
         if answer:
             await message.reply(answer, parse_mode=None)
@@ -249,15 +293,33 @@ async def private_handler(message: types.Message):
             elif text_lower.startswith('улитка'):
                 question = text[6:].strip()
             
-            if not question:
+            photo_base64 = None
+            if message.photo:
+                photo = message.photo[-1]
+                if photo.file_size > 20 * 1024 * 1024:
+                    await message.reply("Фото слишком большое. Максимум 20 МБ.")
+                    return
+                
+                try:
+                    photo_bytes = await download_photo(photo.file_id)
+                    photo_base64 = base64.b64encode(photo_bytes).decode('utf-8')
+                except Exception as e:
+                    logging.error(f"Photo download error: {e}")
+                    await message.reply("Ошибка при загрузке фото.")
+                    return
+            
+            if not question and not photo_base64:
                 return
+            
+            if photo_base64 and not question:
+                question = "Реши эту задачу"
             
             await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
             
             school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
-            is_school = any(keyword in question.lower() for keyword in school_keywords)
+            is_school = any(keyword in question.lower() for keyword in school_keywords) or photo_base64
             
-            answer = await ask_perplexity(question=question, is_school_task=is_school)
+            answer = await ask_perplexity(question=question, is_school_task=is_school, photo_base64=photo_base64)
             
             if answer:
                 await message.reply(answer, parse_mode=None)
