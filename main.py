@@ -102,6 +102,14 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
         
         model = "sonar-pro" if image_data else "sonar"
         
+        # ДОБАВЛЕНО ЛОГИРОВАНИЕ
+        logging.info(f"Sending request to Perplexity:")
+        logging.info(f"Model: {model}")
+        logging.info(f"Has image: {image_data is not None}")
+        if image_data:
+            logging.info(f"Image data length: {len(image_data)}")
+        logging.info(f"Question: {question[:100] if question else 'No question'}...")
+        
         payload = {
             "model": model,
             "messages": messages,
@@ -148,6 +156,9 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
                                 continue
                             return "Слишком много запросов. Попробуй через минуту."
                         else:
+                            # ДОБАВЛЕНО ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОШИБКИ
+                            error_text = await resp.text()
+                            logging.error(f"API error {resp.status}: {error_text}")
                             return f"API ошибка {resp.status}. Попробуй позже."
             except asyncio.TimeoutError:
                 logging.warning(f"Timeout attempt {attempt + 1}/3")
@@ -175,6 +186,14 @@ async def download_and_encode_image(file_url: str) -> str:
                 if resp.status == 200:
                     image_bytes = await resp.read()
                     
+                    # ДОБАВЛЕНО ЛОГИРОВАНИЕ РАЗМЕРА
+                    size_mb = len(image_bytes) / (1024 * 1024)
+                    logging.info(f"Image size: {size_mb:.2f} MB")
+                    
+                    if size_mb > 50:
+                        logging.error(f"Image too large: {size_mb:.2f} MB")
+                        return None
+                    
                     content_type = resp.headers.get('Content-Type', '').lower()
                     if 'png' in content_type:
                         mime_type = 'image/png'
@@ -184,6 +203,11 @@ async def download_and_encode_image(file_url: str) -> str:
                         mime_type = 'image/jpeg'
                     
                     base64_string = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    # ДОБАВЛЕНО ЛОГИРОВАНИЕ BASE64 РАЗМЕРА
+                    base64_size_mb = len(base64_string) / (1024 * 1024)
+                    logging.info(f"Base64 size: {base64_size_mb:.2f} MB")
+                    
                     return f"data:{mime_type};base64,{base64_string}"
                 else:
                     logging.error(f"Failed to download image: {resp.status}")
