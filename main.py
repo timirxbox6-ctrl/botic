@@ -16,7 +16,7 @@ except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
 
-AI_MODEL = "sonar"
+AI_MODEL = "sonar-pro"
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
 
