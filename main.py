@@ -16,7 +16,7 @@ except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
 
-AI_MODEL = "sonar-pro"
+AI_MODEL = "sonar"
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
 
@@ -67,28 +67,33 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
             "Content-Type": "application/json"
         }
         
-        system_prompt = (
-            "Ты Улитка. "
-            "Отвечай прямо и коротко максимум 300 символов. "
-            "ЗАПРЕЩЕНО использовать LaTeX \\( \\) \\[ \\] $ $$. "
-            "Пиши формулы обычным текстом с Unicode: ², ³, √. "
-            "Пример: x² + y² = z² "
-            "Не пиши списки цифры звездочки тире. "
-            "Просто отвечай нормально как человек. "
-            "Если вопрос с матом отвечай так же коротко."
+        base_system_prompt = (
+            "Твое имя Улитка. "
+            "Отвечай прямо на вопрос без лишнего текста максимум 524 символа. "
+            "ЗАПРЕЩЕНО писать что ты думаешь или объяснять процесс размышления. "
+            "СТРОГО ЗАПРЕЩЕНО использовать LaTeX, математические символы типа \\(x\\), \\[формула\\], $x$, $$формула$$. "
+            "Формулы пиши красиво обычными символами Unicode: используй ², ³ для степеней, √ для корня. "
+            "Например: c² = a² + b², D = b² − 4ac, x = (−b ± √D) / 2a "
+            "Ссылки вставляй прямо в текст без скобок просто https://example.com "
+            "На вопросы с фото сразу отвечай кратко без длинных описаний. "
+            "Не используй нумерованные списки или звездочки для оформления. "
+            "Пиши ответ обычным телеграм текстом красиво и понятно. "
+            "Если формат вопроса грубый отвечай так же жестко но коротко максимум 30 слов."
         )
         
         if is_school_task:
-            system_prompt += " Если задача дай ссылку на решение без скобок."
+            system_prompt = base_system_prompt + (
+                " Если попросят решить задачу по математике физике химии биологии "
+                "найди в интернете аналогичную с решением проверь что сайт работает в РФ "
+                "и дай прямую ссылку без скобок просто URL."
+            )
+        else:
+            system_prompt = base_system_prompt
         
         messages = [{"role": "system", "content": system_prompt}]
         
         if image_base64:
-            if not question or len(question.strip()) < 10:
-                user_text = "Реши задачу на фото."
-            else:
-                user_text = question
-            
+            user_text = question if question else "Что на фото? Опиши кратко."
             user_content = [
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                 {"type": "text", "text": user_text}
@@ -100,9 +105,9 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
         payload = {
             "model": AI_MODEL,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": 0.2,
             "top_p": 0.9,
-            "max_tokens": 800,
+            "max_tokens": 4000,
             "search_recency_filter": "month",
             "return_images": False,
             "return_related_questions": False,
@@ -120,7 +125,7 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
                     result = await resp.json()
                     answer = result['choices'][0]['message']['content']
                     if not answer:
-                        return "Не понял вопрос."
+                        return "Не смог сформулировать ответ. Попробуй переформулировать."
                     
                     answer = re.sub(r'\\\[.*?\\\]', '', answer, flags=re.DOTALL)
                     answer = re.sub(r'\\\(.*?\\\)', '', answer, flags=re.DOTALL)
@@ -131,25 +136,17 @@ async def ask_perplexity(question: str, image_base64: str = None, is_school_task
                     answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
                     answer = re.sub(r'\[(\d+)\]', '', answer)
                     
-                    lines = answer.split('\n')
-                    cleaned = []
-                    for line in lines:
-                        line = line.strip()
-                        if line and not line.startswith('-') and not line.startswith('•'):
-                            cleaned.append(line)
-                    answer = ' '.join(cleaned)
-                    
-                    if len(answer) > 300:
-                        answer = answer[:297] + "..."
+                    if len(answer) > 524:
+                        answer = answer[:521] + "..."
                     
                     return answer.strip()
                 elif resp.status == 429:
-                    return "Слишком много запросов."
+                    return "Слишком много запросов. Попробуй через минуту."
                 else:
-                    return f"Ошибка {resp.status}."
+                    return f"API ошибка {resp.status}. Попробуй позже."
     except Exception as e:
-        logging.error(f"Error: {e}", exc_info=True)
-        return "Ошибка."
+        logging.error(f"Perplexity query error: {e}", exc_info=True)
+        return "Ошибка при обработке запроса."
 
 async def on_startup(dp):
     await bot.delete_my_commands()
@@ -227,7 +224,7 @@ async def main_handler(message: types.Message):
                             image_data = await resp.read()
                             image_base64 = base64.b64encode(image_data).decode('utf-8')
             except Exception as e:
-                logging.error(f"Image error: {e}")
+                logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
                 return
         elif message.reply_to_message and message.reply_to_message.photo:
@@ -242,7 +239,7 @@ async def main_handler(message: types.Message):
                             image_data = await resp.read()
                             image_base64 = base64.b64encode(image_data).decode('utf-8')
             except Exception as e:
-                logging.error(f"Image error: {e}")
+                logging.error(f"Image download error: {e}")
                 await message.reply("Не могу загрузить фото.")
                 return
         
@@ -287,7 +284,7 @@ async def private_handler(message: types.Message):
                                 image_data = await resp.read()
                                 image_base64 = base64.b64encode(image_data).decode('utf-8')
                 except Exception as e:
-                    logging.error(f"Image error: {e}")
+                    logging.error(f"Image download error: {e}")
                     await message.reply("Не могу загрузить фото.")
                     return
             
