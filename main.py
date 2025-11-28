@@ -60,7 +60,34 @@ def save_nicks():
 
 load_data()
 
-async def ask_perplexity(question: str, image_data: str = None, is_school_task: bool = False) -> str:
+async def download_image_as_base64(file_url: str) -> str:
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    image_data = await resp.read()
+                    
+                    size_mb = len(image_data) / (1024 * 1024)
+                    logging.info(f"Image size: {size_mb:.2f} MB")
+                    
+                    if size_mb > 50:
+                        logging.error(f"Image too large: {size_mb:.2f} MB")
+                        return None
+                    
+                    base64_string = base64.b64encode(image_data).decode('utf-8')
+                    
+                    base64_size_mb = len(base64_string) / (1024 * 1024)
+                    logging.info(f"Base64 size: {base64_size_mb:.2f} MB")
+                    
+                    return base64_string
+                else:
+                    logging.error(f"Failed to download image: {resp.status}")
+                    return None
+    except Exception as e:
+        logging.error(f"Image download error: {e}")
+        return None
+
+async def ask_perplexity(question: str, image_base64: str = None, is_school_task: bool = False) -> str:
     try:
         headers = {
             "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -90,32 +117,39 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
         
         messages = [{"role": "system", "content": system_prompt}]
         
-        if image_data:
-            user_text = question if question else "Что на фото? Опиши кратко и реши если это задача."
+        if image_base64:
+            user_text = question if question else "Проанализируй это изображение детально. Если это задание или упражнение - реши его полностью."
             user_content = [
-                {"type": "image_url", "image_url": {"url": image_data}},
-                {"type": "text", "text": user_text}
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{image_base64}"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": user_text
+                }
             ]
             messages.append({"role": "user", "content": user_content})
         else:
             messages.append({"role": "user", "content": question})
         
-        model = "sonar-pro" if image_data else "sonar"
+        model = "sonar-pro" if image_base64 else "sonar"
         
-        # ДОБАВЛЕНО ЛОГИРОВАНИЕ
         logging.info(f"Sending request to Perplexity:")
         logging.info(f"Model: {model}")
-        logging.info(f"Has image: {image_data is not None}")
-        if image_data:
-            logging.info(f"Image data length: {len(image_data)}")
+        logging.info(f"Has image: {image_base64 is not None}")
+        if image_base64:
+            logging.info(f"Image data length: {len(image_base64)}")
         logging.info(f"Question: {question[:100] if question else 'No question'}...")
         
         payload = {
             "model": model,
             "messages": messages,
             "temperature": 0.2,
-            "top_p": 0.8,
-            "max_tokens": 2000,
+            "top_p": 0.9,
+            "max_tokens": 4000,
             "search_recency_filter": "month",
             "return_images": False,
             "return_related_questions": False,
@@ -137,6 +171,7 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
                             if not answer:
                                 return "Не смог сформулировать ответ. Попробуй переформулировать."
                             
+                            answer = re.sub(r'\[(\d+)\]', '', answer)
                             answer = re.sub(r'\\\[.*?\\\]', '', answer, flags=re.DOTALL)
                             answer = re.sub(r'\\\(.*?\\\)', '', answer, flags=re.DOTALL)
                             answer = re.sub(r'\$\$.*?\$\$', '', answer, flags=re.DOTALL)
@@ -144,7 +179,6 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
                             answer = re.sub(r'\*\*', '', answer)
                             answer = re.sub(r'^\s*[-•]\s*', '', answer, flags=re.MULTILINE)
                             answer = re.sub(r'^\s*\d+\.\s*', '', answer, flags=re.MULTILINE)
-                            answer = re.sub(r'\[(\d+)\]', '', answer)
                             
                             if len(answer) > 3500:
                                 answer = answer[:3497] + "..."
@@ -156,7 +190,6 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
                                 continue
                             return "Слишком много запросов. Попробуй через минуту."
                         else:
-                            # ДОБАВЛЕНО ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ ОШИБКИ
                             error_text = await resp.text()
                             logging.error(f"API error {resp.status}: {error_text}")
                             return f"API ошибка {resp.status}. Попробуй позже."
@@ -178,43 +211,6 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
     except Exception as e:
         logging.error(f"Perplexity query error: {e}", exc_info=True)
         return "Ошибка при обработке запроса."
-
-async def download_and_encode_image(file_url: str) -> str:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
-                    image_bytes = await resp.read()
-                    
-                    # ДОБАВЛЕНО ЛОГИРОВАНИЕ РАЗМЕРА
-                    size_mb = len(image_bytes) / (1024 * 1024)
-                    logging.info(f"Image size: {size_mb:.2f} MB")
-                    
-                    if size_mb > 50:
-                        logging.error(f"Image too large: {size_mb:.2f} MB")
-                        return None
-                    
-                    content_type = resp.headers.get('Content-Type', '').lower()
-                    if 'png' in content_type:
-                        mime_type = 'image/png'
-                    elif 'jpeg' in content_type or 'jpg' in content_type:
-                        mime_type = 'image/jpeg'
-                    else:
-                        mime_type = 'image/jpeg'
-                    
-                    base64_string = base64.b64encode(image_bytes).decode('utf-8')
-                    
-                    # ДОБАВЛЕНО ЛОГИРОВАНИЕ BASE64 РАЗМЕРА
-                    base64_size_mb = len(base64_string) / (1024 * 1024)
-                    logging.info(f"Base64 size: {base64_size_mb:.2f} MB")
-                    
-                    return f"data:{mime_type};base64,{base64_string}"
-                else:
-                    logging.error(f"Failed to download image: {resp.status}")
-                    return None
-    except Exception as e:
-        logging.error(f"Error downloading image: {e}")
-        return None
 
 async def extract_image_url(text: str) -> str:
     url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
@@ -289,50 +285,95 @@ async def main_handler(message: types.Message):
         
         await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
         
-        image_data = None
+        image_base64 = None
+        processing_msg = None
         
         if message.photo:
             try:
+                processing_msg = await message.answer("Обрабатываю изображение...")
+                
                 photo = message.photo[-1]
                 file = await bot.get_file(photo.file_id)
                 file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                image_data = await download_and_encode_image(file_url)
-                if not image_data:
-                    await message.reply("Не могу загрузить фото.")
+                
+                image_base64 = await download_image_as_base64(file_url)
+                
+                if not image_base64:
+                    await processing_msg.edit_text("Ошибка обработки изображения. Попробуй ещё раз.")
                     return
+                
+                try:
+                    await processing_msg.edit_text("бем бем бем...")
+                except:
+                    pass
+                    
             except Exception as e:
                 logging.error(f"Image download error: {e}")
-                await message.reply("Не могу загрузить фото.")
+                if processing_msg:
+                    await processing_msg.edit_text("Не могу загрузить фото.")
+                else:
+                    await message.reply("Не могу загрузить фото.")
                 return
         elif message.reply_to_message and message.reply_to_message.photo:
             try:
+                processing_msg = await message.answer("Обрабатываю изображение...")
+                
                 photo = message.reply_to_message.photo[-1]
                 file = await bot.get_file(photo.file_id)
                 file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                image_data = await download_and_encode_image(file_url)
-                if not image_data:
-                    await message.reply("Не могу загрузить фото.")
+                
+                image_base64 = await download_image_as_base64(file_url)
+                
+                if not image_base64:
+                    await processing_msg.edit_text("Ошибка обработки изображения. Попробуй ещё раз.")
                     return
+                
+                try:
+                    await processing_msg.edit_text("бем бем бем...")
+                except:
+                    pass
+                    
             except Exception as e:
                 logging.error(f"Image download error: {e}")
-                await message.reply("Не могу загрузить фото.")
+                if processing_msg:
+                    await processing_msg.edit_text("Не могу загрузить фото.")
+                else:
+                    await message.reply("Не могу загрузить фото.")
                 return
         
-        if not image_data:
+        if not image_base64:
             extracted_url = await extract_image_url(question)
             if extracted_url:
-                image_data = await download_and_encode_image(extracted_url)
-                if not image_data:
+                try:
+                    processing_msg = await message.answer("Загружаю изображение по ссылке...")
+                    image_base64 = await download_image_as_base64(extracted_url)
+                    
+                    if not image_base64:
+                        await processing_msg.edit_text("Не могу загрузить изображение по ссылке.")
+                        return
+                    
+                    try:
+                        await processing_msg.edit_text("Анализирую с помощью AI...")
+                    except:
+                        pass
+                except Exception as e:
+                    logging.error(f"URL image download error: {e}")
                     await message.reply("Не могу загрузить изображение по ссылке.")
                     return
         
-        if not question and not image_data:
+        if not question and not image_base64:
             return
         
         school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
         is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
         
-        answer = await ask_perplexity(question=question, image_data=image_data, is_school_task=is_school)
+        answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
+        
+        if processing_msg:
+            try:
+                await processing_msg.delete()
+            except:
+                pass
         
         if answer:
             await message.reply(answer, parse_mode=None)
@@ -353,37 +394,69 @@ async def private_handler(message: types.Message):
             
             await bot.send_chat_action(message.chat.id, types.ChatActions.TYPING)
             
-            image_data = None
+            image_base64 = None
+            processing_msg = None
             
             if message.photo:
                 try:
+                    processing_msg = await message.answer("Обрабатываю изображение...")
+                    
                     photo = message.photo[-1]
                     file = await bot.get_file(photo.file_id)
                     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-                    image_data = await download_and_encode_image(file_url)
-                    if not image_data:
-                        await message.reply("Не могу загрузить фото.")
+                    
+                    image_base64 = await download_image_as_base64(file_url)
+                    
+                    if not image_base64:
+                        await processing_msg.edit_text("Ошибка обработки изображения. Попробуй ещё раз.")
                         return
+                    
+                    try:
+                        await processing_msg.edit_text("бем бем бем...")
+                    except:
+                        pass
+                        
                 except Exception as e:
                     logging.error(f"Image download error: {e}")
-                    await message.reply("Не могу загрузить фото.")
+                    if processing_msg:
+                        await processing_msg.edit_text("Не могу загрузить фото.")
+                    else:
+                        await message.reply("Не могу загрузить фото.")
                     return
             
-            if not image_data:
+            if not image_base64:
                 extracted_url = await extract_image_url(question)
                 if extracted_url:
-                    image_data = await download_and_encode_image(extracted_url)
-                    if not image_data:
-                        await message.reply("Не могу загрузить изображение по ссылке.")
+                    try:
+                        processing_msg = await message.answer("Загружаю фото по ссылке...")
+                        image_base64 = await download_image_as_base64(extracted_url)
+                        
+                        if not image_base64:
+                            await processing_msg.edit_text("хуйня фото.")
+                            return
+                        
+                        try:
+                            await processing_msg.edit_text("бем бем бем...")
+                        except:
+                            pass
+                    except Exception as e:
+                        logging.error(f"URL image download error: {e}")
+                        await message.reply("не могу по ссылке просмотреть.")
                         return
             
-            if not question and not image_data:
+            if not question and not image_base64:
                 return
             
             school_keywords = ["реши", "решить", "задач", "пример", "уравнение", "формул", "теорем"]
             is_school = any(keyword in question.lower() for keyword in school_keywords) if question else False
             
-            answer = await ask_perplexity(question=question, image_data=image_data, is_school_task=is_school)
+            answer = await ask_perplexity(question=question, image_base64=image_base64, is_school_task=is_school)
+            
+            if processing_msg:
+                try:
+                    await processing_msg.delete()
+                except:
+                    pass
             
             if answer:
                 await message.reply(answer, parse_mode=None)
