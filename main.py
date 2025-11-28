@@ -16,7 +16,8 @@ except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
 
-AI_MODEL = "sonar"
+AI_MODEL = "sonar-pro"
+
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
 
@@ -78,6 +79,7 @@ async def ask_perplexity(question: str, image_data: str = None, is_school_task: 
             "Не используй нумерованные списки или звездочки для оформления. "
             "Пиши ответ обычным телеграм текстом красиво и понятно. "
             "Если формат вопроса грубый отвечай так же жестко но коротко максимум 30 слов."
+            "без эмодзи"
         )
         
         if is_school_task:
