@@ -1,1 +1,2 @@
-pip install aiogram
+aiogram==3.22.0
+aiohttp==3.11.11
