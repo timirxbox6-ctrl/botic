@@ -5,7 +5,20 @@ import os
 import re
 import asyncio
 import base64
+import aiosqlite
+import pytz
+import random
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram_calendar import SimpleCalendar, simple_cal_callback
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+import pickle
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
@@ -19,16 +32,47 @@ except ValueError:
 
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
+EVENTS_DB = "/data/events.db"
 
 if not BOT_TOKEN or not PERPLEXITY_API_KEY:
     logging.error("ОШИБКА: Не найдены BOT_TOKEN или PERPLEXITY_API_KEY в переменных окружения!")
     exit(1)
 
 logging.basicConfig(level=logging.INFO)
+storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
+dp = Dispatcher(bot, storage=storage)
 known_users = set()
 nicknames = {}
+
+EKB_TZ = pytz.timezone('Asia/Yekaterinburg')
+SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# FSM States
+class EventStates(StatesGroup):
+    waiting_for_title = State()
+    waiting_for_date = State()
+    waiting_for_time = State()
+    waiting_for_description = State()
+
+class MafiaStates(StatesGroup):
+    registration = State()
+    night = State()
+    day = State()
+
+# Игры Мафии
+mafia_games = {}
+
+class MafiaGame:
+    def __init__(self, chat_id):
+        self.chat_id = chat_id
+        self.players = []
+        self.mafia = []
+        self.detective = None
+        self.doctor = None
+        self.alive = []
+        self.phase = "registration"
+        self.day_num = 0
 
 def load_data():
     global known_users, nicknames
@@ -58,6 +102,96 @@ def save_nicks():
             json.dump(nicknames, f, ensure_ascii=False)
     except: pass
 
+async def init_events_db():
+    async with aiosqlite.connect(EVENTS_DB) as db:
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                chat_id INTEGER,
+                title TEXT,
+                description TEXT,
+                event_date TEXT,
+                event_time TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                google_event_id TEXT
+            )
+        ''')
+        await db.commit()
+
+async def save_event(user_id, chat_id, title, description, event_date, event_time, google_event_id=None):
+    async with aiosqlite.connect(EVENTS_DB) as db:
+        await db.execute('''
+            INSERT INTO events (user_id, chat_id, title, description, event_date, event_time, google_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, title, description, event_date, event_time, google_event_id))
+        await db.commit()
+
+async def get_upcoming_events(chat_id, limit=10):
+    async with aiosqlite.connect(EVENTS_DB) as db:
+        async with db.execute('''
+            SELECT title, description, event_date, event_time
+            FROM events
+            WHERE chat_id = ? AND event_date >= date('now')
+            ORDER BY event_date, event_time
+            LIMIT ?
+        ''', (chat_id, limit)) as cursor:
+            return await cursor.fetchall()
+
+def get_calendar_service():
+    creds = None
+    if os.path.exists('/data/token.pickle'):
+        with open('/data/token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            if not os.path.exists('/data/credentials.json'):
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file(
+                '/data/credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        with open('/data/token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    
+    return build('calendar', 'v3', credentials=creds)
+
+def create_google_event(title, description, start_datetime, duration_minutes=60):
+    try:
+        service = get_calendar_service()
+        if not service:
+            return None
+        
+        end_datetime = start_datetime + timedelta(minutes=duration_minutes)
+        
+        event = {
+            'summary': title,
+            'description': description,
+            'start': {
+                'dateTime': start_datetime.isoformat(),
+                'timeZone': 'Asia/Yekaterinburg',
+            },
+            'end': {
+                'dateTime': end_datetime.isoformat(),
+                'timeZone': 'Asia/Yekaterinburg',
+            },
+            'reminders': {
+                'useDefault': False,
+                'overrides': [
+                    {'method': 'popup', 'minutes': 30},
+                ],
+            },
+        }
+        
+        created_event = service.events().insert(calendarId='primary', body=event).execute()
+        return created_event.get('id')
+    except Exception as e:
+        logging.error(f"Google Calendar error: {e}")
+        return None
+
 load_data()
 
 async def download_photo(file_id: str) -> bytes:
@@ -81,6 +215,7 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
             "Формулы пиши обычными символами Unicode: используй ², ³ для степеней, √ для корня. "
             "Например: c² = a² + b², D = b² − 4ac, x = (−b ± √D) / 2a "
             "На простые вопросы типа привет отвечай кратко одним предложением. "
+            "Будь веселым"
         )
         
         if is_school_task:
@@ -125,7 +260,7 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
             "messages": messages,
             "temperature": 0.2,
             "top_p": 0.9,
-            "max_tokens": 4000,
+            "max_tokens": 2000,
             "search_recency_filter": "month",
             "return_images": False,
             "return_related_questions": False,
@@ -190,7 +325,234 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
 
 async def on_startup(dp):
     await bot.delete_my_commands()
+    await init_events_db()
 
+# === СОБЫТИЯ ===
+@dp.message_handler(commands=['event'], chat_id=ALLOWED_CHAT_ID, state='*')
+async def cmd_add_event(message: types.Message):
+    await message.reply("Введите название события:")
+    await EventStates.waiting_for_title.set()
+
+@dp.message_handler(state=EventStates.waiting_for_title)
+async def process_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text)
+    await message.answer("Выберите дату:", reply_markup=await SimpleCalendar().start_calendar())
+    await EventStates.waiting_for_date.set()
+
+@dp.callback_query_handler(simple_cal_callback.filter(), state=EventStates.waiting_for_date)
+async def process_date(callback_query: types.CallbackQuery, callback_data: dict, state: FSMContext):
+    calendar = SimpleCalendar()
+    selected, date = await calendar.process_selection(callback_query, callback_data)
+    
+    if selected:
+        await state.update_data(event_date=date.strftime('%Y-%m-%d'))
+        
+        time_kb = types.InlineKeyboardMarkup(row_width=3)
+        time_kb.add(
+            types.InlineKeyboardButton("08:00", callback_data="time_08:00"),
+            types.InlineKeyboardButton("09:00", callback_data="time_09:00"),
+            types.InlineKeyboardButton("10:00", callback_data="time_10:00"),
+            types.InlineKeyboardButton("12:00", callback_data="time_12:00"),
+            types.InlineKeyboardButton("14:00", callback_data="time_14:00"),
+            types.InlineKeyboardButton("16:00", callback_data="time_16:00"),
+            types.InlineKeyboardButton("18:00", callback_data="time_18:00"),
+            types.InlineKeyboardButton("20:00", callback_data="time_20:00"),
+            types.InlineKeyboardButton("22:00", callback_data="time_22:00")
+        )
+        time_kb.add(types.InlineKeyboardButton("Свое время", callback_data="time_custom"))
+        
+        await callback_query.message.answer(
+            f"Дата: {date.strftime('%d.%m.%Y')}\n\nВыберите время:",
+            reply_markup=time_kb
+        )
+        await EventStates.waiting_for_time.set()
+
+@dp.callback_query_handler(lambda c: c.data.startswith("time_"), state=EventStates.waiting_for_time)
+async def process_time(callback: types.CallbackQuery, state: FSMContext):
+    time_str = callback.data.replace("time_", "")
+    
+    if time_str == "custom":
+        await callback.message.answer("Введите время в формате ЧЧ:ММ (например 15:30):")
+        return
+    
+    await state.update_data(event_time=time_str)
+    await callback.message.answer("Введите описание события или /skip для пропуска:")
+    await EventStates.waiting_for_description.set()
+
+@dp.message_handler(state=EventStates.waiting_for_time)
+async def process_custom_time(message: types.Message, state: FSMContext):
+    try:
+        datetime.strptime(message.text, '%H:%M')
+        await state.update_data(event_time=message.text)
+        await message.answer("Введите описание события или /skip для пропуска:")
+        await EventStates.waiting_for_description.set()
+    except ValueError:
+        await message.answer("Неверный формат. Введите время в формате ЧЧ:ММ:")
+
+@dp.message_handler(state=EventStates.waiting_for_description)
+async def process_description(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    description = "Нет описания" if message.text == "/skip" else message.text
+    
+    event_datetime = EKB_TZ.localize(
+        datetime.strptime(f"{data['event_date']} {data['event_time']}", '%Y-%m-%d %H:%M')
+    )
+    
+    google_event_id = create_google_event(
+        title=data['title'],
+        description=description,
+        start_datetime=event_datetime
+    )
+    
+    await save_event(
+        user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        title=data['title'],
+        description=description,
+        event_date=data['event_date'],
+        event_time=data['event_time'],
+        google_event_id=google_event_id
+    )
+    
+    calendar_status = "Добавлено в календарь" if google_event_id else "Сохранено только в боте"
+    
+    await message.answer(
+        f"Событие создано\n\n"
+        f"{data['title']}\n"
+        f"{data['event_date']} в {data['event_time']}\n"
+        f"{description}\n\n"
+        f"{calendar_status}"
+    )
+    await state.finish()
+
+@dp.message_handler(commands=['events'], chat_id=ALLOWED_CHAT_ID)
+async def cmd_events(message: types.Message):
+    events = await get_upcoming_events(message.chat.id)
+    
+    if not events:
+        await message.reply("Нет предстоящих событий")
+        return
+    
+    text = "Предстоящие события:\n\n"
+    for i, (title, desc, date, time) in enumerate(events, 1):
+        text += f"{i}. {title}\n{date} в {time}\n{desc}\n\n"
+    
+    await message.reply(text)
+
+# === МАФИЯ ===
+@dp.message_handler(commands=['mafia'], chat_id=ALLOWED_CHAT_ID)
+async def cmd_mafia(message: types.Message):
+    chat_id = message.chat.id
+    
+    if chat_id in mafia_games:
+        await message.reply("Игра уже идет")
+        return
+    
+    mafia_games[chat_id] = MafiaGame(chat_id)
+    
+    kb = types.InlineKeyboardMarkup()
+    kb.add(types.InlineKeyboardButton("Войти в игру", callback_data="mafia_join"))
+    kb.add(types.InlineKeyboardButton("Начать игру", callback_data="mafia_start"))
+    
+    await message.answer(
+        "Игра МАФИЯ\n\n"
+        "Роли:\n"
+        "Мафия - убивает игроков ночью\n"
+        "Мирные жители - голосуют днем\n"
+        "Детектив - проверяет игроков ночью\n"
+        "Доктор - спасает игроков ночью\n\n"
+        "Минимум 4 игрока для старта",
+        reply_markup=kb
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "mafia_join")
+async def mafia_join(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    
+    if chat_id not in mafia_games:
+        await callback.answer("Игра не начата")
+        return
+    
+    game = mafia_games[chat_id]
+    user = callback.from_user
+    
+    if user.id in [p['id'] for p in game.players]:
+        await callback.answer("Вы уже в игре")
+        return
+    
+    game.players.append({
+        'id': user.id,
+        'name': user.first_name,
+        'role': None,
+        'alive': True
+    })
+    
+    await callback.answer("Вы в игре")
+    await callback.message.answer(f"{user.first_name} присоединился. Всего игроков: {len(game.players)}")
+
+@dp.callback_query_handler(lambda c: c.data == "mafia_start")
+async def mafia_start(callback: types.CallbackQuery):
+    chat_id = callback.message.chat.id
+    
+    if chat_id not in mafia_games:
+        await callback.answer("Игра не начата")
+        return
+    
+    game = mafia_games[chat_id]
+    
+    if len(game.players) < 4:
+        await callback.answer("Нужно минимум 4 игрока")
+        return
+    
+    players = game.players.copy()
+    random.shuffle(players)
+    
+    mafia_count = max(1, len(players) // 3)
+    for i in range(mafia_count):
+        players[i]['role'] = 'mafia'
+        game.mafia.append(players[i]['id'])
+    
+    players[mafia_count]['role'] = 'detective'
+    game.detective = players[mafia_count]['id']
+    
+    if len(players) > mafia_count + 1:
+        players[mafia_count + 1]['role'] = 'doctor'
+        game.doctor = players[mafia_count + 1]['id']
+    
+    for i in range(mafia_count + 2, len(players)):
+        players[i]['role'] = 'citizen'
+    
+    game.alive = [p['id'] for p in players]
+    game.phase = "night"
+    
+    role_text = {
+        'mafia': 'Вы МАФИЯ. Убивайте мирных жителей.',
+        'detective': 'Вы ДЕТЕКТИВ. Проверяйте подозрительных.',
+        'doctor': 'Вы ДОКТОР. Спасайте игроков.',
+        'citizen': 'Вы МИРНЫЙ ЖИТЕЛЬ. Ищите мафию.'
+    }
+    
+    for player in players:
+        try:
+            await bot.send_message(player['id'], f"Ваша роль: {role_text[player['role']]}")
+        except:
+            pass
+    
+    await callback.message.answer(
+        f"Игра началась. Участвует {len(players)} игроков.\n"
+        f"Наступает ночь. Роли отправлены в личные сообщения."
+    )
+
+@dp.message_handler(commands=['mafia_stop'], chat_id=ALLOWED_CHAT_ID)
+async def cmd_mafia_stop(message: types.Message):
+    chat_id = message.chat.id
+    if chat_id in mafia_games:
+        del mafia_games[chat_id]
+        await message.reply("Игра остановлена")
+    else:
+        await message.reply("Игра не идет")
+
+# === ОСТАЛЬНЫЕ ХЕНДЛЕРЫ ===
 @dp.message_handler(content_types=types.ContentTypes.NEW_CHAT_MEMBERS, chat_id=ALLOWED_CHAT_ID)
 async def on_join(message: types.Message):
     for u in message.new_chat_members:
