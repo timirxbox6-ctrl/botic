@@ -25,7 +25,15 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-    ALLOWED_CHAT_ID = int(os.getenv("ALLOWED_CHAT_ID", "0"))
+    
+    # Поддержка нескольких групп через запятую
+    allowed_chats_str = os.getenv("ALLOWED_CHAT_ID", "0")
+    ALLOWED_CHAT_IDS = [int(x.strip()) for x in allowed_chats_str.split(",") if x.strip()]
+    
+    if not ALLOWED_CHAT_IDS or ALLOWED_CHAT_IDS == [0]:
+        logging.error("ALLOWED_CHAT_ID не настроен!")
+        exit(1)
+        
 except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
@@ -47,6 +55,10 @@ nicknames = {}
 
 EKB_TZ = pytz.timezone('Asia/Yekaterinburg')
 SCOPES = ['https://www.googleapis.com/auth/calendar']
+
+# Фильтр для проверки разрешенных чатов
+def is_allowed_chat(message: types.Message) -> bool:
+    return message.chat.id in ALLOWED_CHAT_IDS
 
 # FSM States
 class EventStates(StatesGroup):
@@ -326,9 +338,10 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
 async def on_startup(dp):
     await bot.delete_my_commands()
     await init_events_db()
+    logging.info(f"Бот запущен для групп: {ALLOWED_CHAT_IDS}")
 
 # === СОБЫТИЯ ===
-@dp.message_handler(commands=['event'], chat_id=ALLOWED_CHAT_ID, state='*')
+@dp.message_handler(is_allowed_chat, commands=['event'], state='*')
 async def cmd_add_event(message: types.Message):
     await message.reply("Введите название события:")
     await EventStates.waiting_for_title.set()
@@ -339,11 +352,12 @@ async def process_title(message: types.Message, state: FSMContext):
     await message.answer("Выберите дату:", reply_markup=await SimpleCalendar().start_calendar())
     await EventStates.waiting_for_date.set()
 
-@dp.callback_query_handler(simple_cal_callback.filter(), state=EventStates.waiting_for_date)
-async def process_date(callback_query: types.CallbackQuery, callback_data: dict, state: FSMContext):
-    selected, date = await SimpleCalendar().process_selection(callback_query, callback_data)
+@dp.callback_query_handler(lambda c: c.data and c.data.startswith('simple_calendar'), state=EventStates.waiting_for_date)
+async def process_date(callback_query: types.CallbackQuery, state: FSMContext):
+    selected, date = await SimpleCalendar().process_selection(callback_query, callback_query.data)
     
     if selected:
+        await callback_query.answer()
         await state.update_data(event_date=date.strftime('%Y-%m-%d'))
         
         time_kb = types.InlineKeyboardMarkup(row_width=3)
@@ -360,7 +374,7 @@ async def process_date(callback_query: types.CallbackQuery, callback_data: dict,
         )
         time_kb.add(types.InlineKeyboardButton("Свое время", callback_data="time_custom"))
         
-        await callback_query.message.answer(
+        await callback_query.message.edit_text(
             f"Дата: {date.strftime('%d.%m.%Y')}\n\nВыберите время:",
             reply_markup=time_kb
         )
@@ -368,6 +382,7 @@ async def process_date(callback_query: types.CallbackQuery, callback_data: dict,
 
 @dp.callback_query_handler(lambda c: c.data.startswith("time_"), state=EventStates.waiting_for_time)
 async def process_time(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
     time_str = callback.data.replace("time_", "")
     
     if time_str == "custom":
@@ -424,7 +439,7 @@ async def process_description(message: types.Message, state: FSMContext):
     )
     await state.finish()
 
-@dp.message_handler(commands=['events'], chat_id=ALLOWED_CHAT_ID)
+@dp.message_handler(is_allowed_chat, commands=['events'])
 async def cmd_events(message: types.Message):
     events = await get_upcoming_events(message.chat.id)
     
@@ -439,7 +454,7 @@ async def cmd_events(message: types.Message):
     await message.reply(text)
 
 # === МАФИЯ ===
-@dp.message_handler(commands=['mafia'], chat_id=ALLOWED_CHAT_ID)
+@dp.message_handler(is_allowed_chat, commands=['mafia'])
 async def cmd_mafia(message: types.Message):
     chat_id = message.chat.id
     
@@ -542,7 +557,7 @@ async def mafia_start(callback: types.CallbackQuery):
         f"Наступает ночь. Роли отправлены в личные сообщения."
     )
 
-@dp.message_handler(commands=['mafia_stop'], chat_id=ALLOWED_CHAT_ID)
+@dp.message_handler(is_allowed_chat, commands=['mafia_stop'])
 async def cmd_mafia_stop(message: types.Message):
     chat_id = message.chat.id
     if chat_id in mafia_games:
@@ -552,7 +567,7 @@ async def cmd_mafia_stop(message: types.Message):
         await message.reply("Игра не идет")
 
 # === ОСТАЛЬНЫЕ ХЕНДЛЕРЫ ===
-@dp.message_handler(content_types=types.ContentTypes.NEW_CHAT_MEMBERS, chat_id=ALLOWED_CHAT_ID)
+@dp.message_handler(is_allowed_chat, content_types=types.ContentTypes.NEW_CHAT_MEMBERS)
 async def on_join(message: types.Message):
     for u in message.new_chat_members:
         if not u.is_bot:
@@ -561,7 +576,7 @@ async def on_join(message: types.Message):
             known_users.add(udata)
             save_users()
 
-@dp.message_handler(content_types=types.ContentTypes.ANY, chat_id=ALLOWED_CHAT_ID)
+@dp.message_handler(is_allowed_chat, content_types=types.ContentTypes.ANY)
 async def main_handler(message: types.Message):
     if not message.from_user.is_bot:
         u = message.from_user
