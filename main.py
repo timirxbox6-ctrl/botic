@@ -13,12 +13,6 @@ from aiogram import Bot, Dispatcher, executor, types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram_calendar import simple_cal_callback, SimpleCalendar
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.discovery import build
-import pickle
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
@@ -54,7 +48,6 @@ known_users = set()
 nicknames = {}
 
 EKB_TZ = pytz.timezone('Asia/Yekaterinburg')
-SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 # Фильтр для проверки разрешенных чатов
 def is_allowed_chat(message: types.Message) -> bool:
@@ -125,18 +118,17 @@ async def init_events_db():
                 description TEXT,
                 event_date TEXT,
                 event_time TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                google_event_id TEXT
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
         await db.commit()
 
-async def save_event(user_id, chat_id, title, description, event_date, event_time, google_event_id=None):
+async def save_event(user_id, chat_id, title, description, event_date, event_time):
     async with aiosqlite.connect(EVENTS_DB) as db:
         await db.execute('''
-            INSERT INTO events (user_id, chat_id, title, description, event_date, event_time, google_event_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, title, description, event_date, event_time, google_event_id))
+            INSERT INTO events (user_id, chat_id, title, description, event_date, event_time)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (user_id, chat_id, title, description, event_date, event_time))
         await db.commit()
 
 async def get_upcoming_events(chat_id, limit=10):
@@ -149,60 +141,6 @@ async def get_upcoming_events(chat_id, limit=10):
             LIMIT ?
         ''', (chat_id, limit)) as cursor:
             return await cursor.fetchall()
-
-def get_calendar_service():
-    creds = None
-    if os.path.exists('/data/token.pickle'):
-        with open('/data/token.pickle', 'rb') as token:
-            creds = pickle.load(token)
-    
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists('/data/credentials.json'):
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file(
-                '/data/credentials.json', SCOPES)
-            creds = flow.run_local_server(port=0)
-        
-        with open('/data/token.pickle', 'wb') as token:
-            pickle.dump(creds, token)
-    
-    return build('calendar', 'v3', credentials=creds)
-
-def create_google_event(title, description, start_datetime, duration_minutes=60):
-    try:
-        service = get_calendar_service()
-        if not service:
-            return None
-        
-        end_datetime = start_datetime + timedelta(minutes=duration_minutes)
-        
-        event = {
-            'summary': title,
-            'description': description,
-            'start': {
-                'dateTime': start_datetime.isoformat(),
-                'timeZone': 'Asia/Yekaterinburg',
-            },
-            'end': {
-                'dateTime': end_datetime.isoformat(),
-                'timeZone': 'Asia/Yekaterinburg',
-            },
-            'reminders': {
-                'useDefault': False,
-                'overrides': [
-                    {'method': 'popup', 'minutes': 30},
-                ],
-            },
-        }
-        
-        created_event = service.events().insert(calendarId='primary', body=event).execute()
-        return created_event.get('id')
-    except Exception as e:
-        logging.error(f"Google Calendar error: {e}")
-        return None
 
 load_data()
 
@@ -349,16 +287,14 @@ async def cmd_add_event(message: types.Message):
 @dp.message_handler(state=EventStates.waiting_for_title)
 async def process_title(message: types.Message, state: FSMContext):
     await state.update_data(title=message.text)
-    await message.answer("Выберите дату:", reply_markup=await SimpleCalendar().start_calendar())
+    await message.answer("Введите дату в формате ДД.ММ.ГГГГ (например 25.12.2025):")
     await EventStates.waiting_for_date.set()
 
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith('simple_calendar'), state=EventStates.waiting_for_date)
-async def process_date(callback_query: types.CallbackQuery, state: FSMContext):
-    selected, date = await SimpleCalendar().process_selection(callback_query, callback_query.data)
-    
-    if selected:
-        await callback_query.answer()
-        await state.update_data(event_date=date.strftime('%Y-%m-%d'))
+@dp.message_handler(state=EventStates.waiting_for_date)
+async def process_date(message: types.Message, state: FSMContext):
+    try:
+        date_obj = datetime.strptime(message.text, '%d.%m.%Y')
+        await state.update_data(event_date=date_obj.strftime('%Y-%m-%d'))
         
         time_kb = types.InlineKeyboardMarkup(row_width=3)
         time_kb.add(
@@ -374,11 +310,13 @@ async def process_date(callback_query: types.CallbackQuery, state: FSMContext):
         )
         time_kb.add(types.InlineKeyboardButton("Свое время", callback_data="time_custom"))
         
-        await callback_query.message.edit_text(
-            f"Дата: {date.strftime('%d.%m.%Y')}\n\nВыберите время:",
+        await message.answer(
+            f"Дата: {date_obj.strftime('%d.%m.%Y')}\n\nВыберите время:",
             reply_markup=time_kb
         )
         await EventStates.waiting_for_time.set()
+    except ValueError:
+        await message.answer("Неверный формат. Введите дату как ДД.ММ.ГГГГ (например 25.12.2025):")
 
 @dp.callback_query_handler(lambda c: c.data.startswith("time_"), state=EventStates.waiting_for_time)
 async def process_time(callback: types.CallbackQuery, state: FSMContext):
@@ -408,34 +346,20 @@ async def process_description(message: types.Message, state: FSMContext):
     data = await state.get_data()
     description = "Нет описания" if message.text == "/skip" else message.text
     
-    event_datetime = EKB_TZ.localize(
-        datetime.strptime(f"{data['event_date']} {data['event_time']}", '%Y-%m-%d %H:%M')
-    )
-    
-    google_event_id = create_google_event(
-        title=data['title'],
-        description=description,
-        start_datetime=event_datetime
-    )
-    
     await save_event(
         user_id=message.from_user.id,
         chat_id=message.chat.id,
         title=data['title'],
         description=description,
         event_date=data['event_date'],
-        event_time=data['event_time'],
-        google_event_id=google_event_id
+        event_time=data['event_time']
     )
-    
-    calendar_status = "Добавлено в эвенты" if google_event_id else "Сохранено только в боте"
     
     await message.answer(
         f"Событие создано\n\n"
         f"{data['title']}\n"
         f"{data['event_date']} в {data['event_time']}\n"
-        f"{description}\n\n"
-        f"{calendar_status}"
+        f"{description}"
     )
     await state.finish()
 
