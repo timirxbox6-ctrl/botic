@@ -405,17 +405,16 @@ async def cmd_mafia(message: types.Message):
 
 @dp.callback_query_handler(lambda c: c.data == "mafia_join")
 async def mafia_join(callback: types.CallbackQuery):
+    await callback.answer("Вы в игре")
     chat_id = callback.message.chat.id
     
     if chat_id not in mafia_games:
-        await callback.answer("Игра не начата")
         return
     
     game = mafia_games[chat_id]
     user = callback.from_user
     
     if user.id in [p['id'] for p in game.players]:
-        await callback.answer("Вы уже в игре")
         return
     
     game.players.append({
@@ -425,21 +424,20 @@ async def mafia_join(callback: types.CallbackQuery):
         'alive': True
     })
     
-    await callback.answer("Вы в игре")
     await callback.message.answer(f"{user.first_name} присоединился. Всего игроков: {len(game.players)}")
 
 @dp.callback_query_handler(lambda c: c.data == "mafia_start")
 async def mafia_start(callback: types.CallbackQuery):
+    await callback.answer()
     chat_id = callback.message.chat.id
     
     if chat_id not in mafia_games:
-        await callback.answer("Игра не начата")
         return
     
     game = mafia_games[chat_id]
     
     if len(game.players) < 4:
-        await callback.answer("Нужно минимум 4 игрока")
+        await callback.answer("Нужно минимум 4 игрока", show_alert=True)
         return
     
     players = game.players.copy()
