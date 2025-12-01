@@ -5,13 +5,8 @@ import os
 import re
 import asyncio
 import base64
-import aiosqlite
-import pytz
 import random
-from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,22 +14,18 @@ PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 try:
     ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-    
-    # Поддержка нескольких групп через запятую
     allowed_chats_str = os.getenv("ALLOWED_CHAT_ID", "0")
     ALLOWED_CHAT_IDS = [int(x.strip()) for x in allowed_chats_str.split(",") if x.strip()]
     
     if not ALLOWED_CHAT_IDS or ALLOWED_CHAT_IDS == [0]:
         logging.error("ALLOWED_CHAT_ID не настроен!")
         exit(1)
-        
 except ValueError:
     logging.error("ADMIN_ID или ALLOWED_CHAT_ID должны быть числами!")
     exit(1)
 
 DB_FILE = "/data/users_db.json"
 NICKNAMES_FILE = "/data/nicks.json"
-EVENTS_DB = "/data/events.db"
 
 if not BOT_TOKEN or not PERPLEXITY_API_KEY:
     logging.error("ОШИБКА: Не найдены BOT_TOKEN или PERPLEXITY_API_KEY в переменных окружения!")
@@ -47,23 +38,8 @@ dp = Dispatcher(bot, storage=storage)
 known_users = set()
 nicknames = {}
 
-EKB_TZ = pytz.timezone('Asia/Yekaterinburg')
-
-# Фильтр для проверки разрешенных чатов
 def is_allowed_chat(message: types.Message) -> bool:
     return message.chat.id in ALLOWED_CHAT_IDS
-
-# FSM States
-class EventStates(StatesGroup):
-    waiting_for_title = State()
-    waiting_for_date = State()
-    waiting_for_time = State()
-    waiting_for_description = State()
-
-class MafiaStates(StatesGroup):
-    registration = State()
-    night = State()
-    day = State()
 
 # Игры Мафии
 mafia_games = {}
@@ -78,6 +54,7 @@ class MafiaGame:
         self.alive = []
         self.phase = "registration"
         self.day_num = 0
+        self.night_actions = {}
 
 def load_data():
     global known_users, nicknames
@@ -106,41 +83,6 @@ def save_nicks():
         with open(NICKNAMES_FILE, "w", encoding="utf-8") as f:
             json.dump(nicknames, f, ensure_ascii=False)
     except: pass
-
-async def init_events_db():
-    async with aiosqlite.connect(EVENTS_DB) as db:
-        await db.execute('''
-            CREATE TABLE IF NOT EXISTS events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                chat_id INTEGER,
-                title TEXT,
-                description TEXT,
-                event_date TEXT,
-                event_time TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        await db.commit()
-
-async def save_event(user_id, chat_id, title, description, event_date, event_time):
-    async with aiosqlite.connect(EVENTS_DB) as db:
-        await db.execute('''
-            INSERT INTO events (user_id, chat_id, title, description, event_date, event_time)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (user_id, chat_id, title, description, event_date, event_time))
-        await db.commit()
-
-async def get_upcoming_events(chat_id, limit=10):
-    async with aiosqlite.connect(EVENTS_DB) as db:
-        async with db.execute('''
-            SELECT title, description, event_date, event_time
-            FROM events
-            WHERE chat_id = ? AND event_date >= date('now')
-            ORDER BY event_date, event_time
-            LIMIT ?
-        ''', (chat_id, limit)) as cursor:
-            return await cursor.fetchall()
 
 load_data()
 
@@ -203,7 +145,6 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
             messages.append({"role": "user", "content": question})
         
         logging.info(f"Sending request to Perplexity with model: {model}")
-        logging.info(f"Question: {question[:100]}...")
         
         payload = {
             "model": model,
@@ -275,107 +216,7 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
 
 async def on_startup(dp):
     await bot.delete_my_commands()
-    await init_events_db()
     logging.info(f"Бот запущен для групп: {ALLOWED_CHAT_IDS}")
-
-# === СОБЫТИЯ ===
-@dp.message_handler(is_allowed_chat, commands=['event'], state='*')
-async def cmd_add_event(message: types.Message):
-    await message.reply("Введите название события:")
-    await EventStates.waiting_for_title.set()
-
-@dp.message_handler(state=EventStates.waiting_for_title)
-async def process_title(message: types.Message, state: FSMContext):
-    await state.update_data(title=message.text)
-    await message.answer("Введите дату в формате ДД.ММ.ГГГГ (например 25.12.2025):")
-    await EventStates.waiting_for_date.set()
-
-@dp.message_handler(state=EventStates.waiting_for_date)
-async def process_date(message: types.Message, state: FSMContext):
-    try:
-        date_obj = datetime.strptime(message.text, '%d.%m.%Y')
-        await state.update_data(event_date=date_obj.strftime('%Y-%m-%d'))
-        
-        time_kb = types.InlineKeyboardMarkup(row_width=3)
-        time_kb.add(
-            types.InlineKeyboardButton("08:00", callback_data="time_08:00"),
-            types.InlineKeyboardButton("09:00", callback_data="time_09:00"),
-            types.InlineKeyboardButton("10:00", callback_data="time_10:00"),
-            types.InlineKeyboardButton("12:00", callback_data="time_12:00"),
-            types.InlineKeyboardButton("14:00", callback_data="time_14:00"),
-            types.InlineKeyboardButton("16:00", callback_data="time_16:00"),
-            types.InlineKeyboardButton("18:00", callback_data="time_18:00"),
-            types.InlineKeyboardButton("20:00", callback_data="time_20:00"),
-            types.InlineKeyboardButton("22:00", callback_data="time_22:00")
-        )
-        time_kb.add(types.InlineKeyboardButton("Свое время", callback_data="time_custom"))
-        
-        await message.answer(
-            f"Дата: {date_obj.strftime('%d.%m.%Y')}\n\nВыберите время:",
-            reply_markup=time_kb
-        )
-        await EventStates.waiting_for_time.set()
-    except ValueError:
-        await message.answer("Неверный формат. Введите дату как ДД.ММ.ГГГГ (например 25.12.2025):")
-
-@dp.callback_query_handler(lambda c: c.data.startswith("time_"), state=EventStates.waiting_for_time)
-async def process_time(callback: types.CallbackQuery, state: FSMContext):
-    await callback.answer()
-    time_str = callback.data.replace("time_", "")
-    
-    if time_str == "custom":
-        await callback.message.answer("Введите время в формате ЧЧ:ММ (например 15:30):")
-        return
-    
-    await state.update_data(event_time=time_str)
-    await callback.message.answer("Введите описание события или /skip для пропуска:")
-    await EventStates.waiting_for_description.set()
-
-@dp.message_handler(state=EventStates.waiting_for_time)
-async def process_custom_time(message: types.Message, state: FSMContext):
-    try:
-        datetime.strptime(message.text, '%H:%M')
-        await state.update_data(event_time=message.text)
-        await message.answer("Введите описание события или /skip для пропуска:")
-        await EventStates.waiting_for_description.set()
-    except ValueError:
-        await message.answer("Неверный формат. Введите время в формате ЧЧ:ММ:")
-
-@dp.message_handler(state=EventStates.waiting_for_description)
-async def process_description(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    description = "Нет описания" if message.text == "/skip" else message.text
-    
-    await save_event(
-        user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        title=data['title'],
-        description=description,
-        event_date=data['event_date'],
-        event_time=data['event_time']
-    )
-    
-    await message.answer(
-        f"Событие создано\n\n"
-        f"{data['title']}\n"
-        f"{data['event_date']} в {data['event_time']}\n"
-        f"{description}"
-    )
-    await state.finish()
-
-@dp.message_handler(is_allowed_chat, commands=['events'])
-async def cmd_events(message: types.Message):
-    events = await get_upcoming_events(message.chat.id)
-    
-    if not events:
-        await message.reply("Нет предстоящих событий")
-        return
-    
-    text = "Предстоящие события:\n\n"
-    for i, (title, desc, date, time) in enumerate(events, 1):
-        text += f"{i}. {title}\n{date} в {time}\n{desc}\n\n"
-    
-    await message.reply(text)
 
 # === МАФИЯ ===
 @dp.message_handler(is_allowed_chat, commands=['mafia'])
@@ -383,7 +224,7 @@ async def cmd_mafia(message: types.Message):
     chat_id = message.chat.id
     
     if chat_id in mafia_games:
-        await message.reply("Игра уже идет")
+        await message.reply("Игра уже идет. Используй /mafia_stop чтобы остановить.")
         return
     
     mafia_games[chat_id] = MafiaGame(chat_id)
@@ -405,16 +246,17 @@ async def cmd_mafia(message: types.Message):
 
 @dp.callback_query_handler(lambda c: c.data == "mafia_join")
 async def mafia_join(callback: types.CallbackQuery):
-    await callback.answer("Вы в игре")
     chat_id = callback.message.chat.id
     
     if chat_id not in mafia_games:
+        await callback.answer("Игра не найдена", show_alert=True)
         return
     
     game = mafia_games[chat_id]
     user = callback.from_user
     
     if user.id in [p['id'] for p in game.players]:
+        await callback.answer("Ты уже в игре")
         return
     
     game.players.append({
@@ -424,14 +266,15 @@ async def mafia_join(callback: types.CallbackQuery):
         'alive': True
     })
     
+    await callback.answer("Ты в игре")
     await callback.message.answer(f"{user.first_name} присоединился. Всего игроков: {len(game.players)}")
 
 @dp.callback_query_handler(lambda c: c.data == "mafia_start")
 async def mafia_start(callback: types.CallbackQuery):
-    await callback.answer()
     chat_id = callback.message.chat.id
     
     if chat_id not in mafia_games:
+        await callback.answer("Игра не найдена", show_alert=True)
         return
     
     game = mafia_games[chat_id]
@@ -460,6 +303,7 @@ async def mafia_start(callback: types.CallbackQuery):
     
     game.alive = [p['id'] for p in players]
     game.phase = "night"
+    game.day_num = 1
     
     role_text = {
         'mafia': 'Вы МАФИЯ. Убивайте мирных жителей.',
@@ -474,9 +318,76 @@ async def mafia_start(callback: types.CallbackQuery):
         except:
             pass
     
+    await callback.answer()
     await callback.message.answer(
         f"Игра началась. Участвует {len(players)} игроков.\n"
-        f"Наступает ночь. Роли отправлены в личные сообщения."
+        f"День {game.day_num}: Наступает ночь. Роли отправлены в личные сообщения.\n\n"
+        f"Мафия и специальные роли делают свой ход.\n"
+        f"Утром используй /mafia_day для начала дня."
+    )
+
+@dp.message_handler(is_allowed_chat, commands=['mafia_day'])
+async def cmd_mafia_day(message: types.Message):
+    chat_id = message.chat.id
+    
+    if chat_id not in mafia_games:
+        await message.reply("Игра не идет")
+        return
+    
+    game = mafia_games[chat_id]
+    
+    if game.phase != "night":
+        await message.reply("Сейчас не ночь")
+        return
+    
+    game.phase = "day"
+    
+    alive_players = [p for p in game.players if p['id'] in game.alive]
+    alive_names = ", ".join([p['name'] for p in alive_players])
+    
+    mafia_alive = [p for p in game.players if p['id'] in game.mafia and p['id'] in game.alive]
+    citizens_alive = [p for p in alive_players if p['id'] not in game.mafia]
+    
+    if not mafia_alive:
+        await message.answer(f"Мирные жители победили! Вся мафия устранена.")
+        del mafia_games[chat_id]
+        return
+    
+    if len(citizens_alive) <= len(mafia_alive):
+        await message.answer(f"Мафия победила! Мафии столько же или больше чем мирных.")
+        del mafia_games[chat_id]
+        return
+    
+    await message.answer(
+        f"День {game.day_num}\n\n"
+        f"Живые игроки ({len(alive_players)}):\n{alive_names}\n\n"
+        f"Обсуждайте и голосуйте кого исключить.\n"
+        f"Используй /mafia_vote @username для голосования\n"
+        f"Используй /mafia_night для перехода в ночь"
+    )
+
+@dp.message_handler(is_allowed_chat, commands=['mafia_night'])
+async def cmd_mafia_night(message: types.Message):
+    chat_id = message.chat.id
+    
+    if chat_id not in mafia_games:
+        await message.reply("Игра не идет")
+        return
+    
+    game = mafia_games[chat_id]
+    
+    if game.phase != "day":
+        await message.reply("Сейчас не день")
+        return
+    
+    game.phase = "night"
+    game.day_num += 1
+    game.night_actions = {}
+    
+    await message.answer(
+        f"Наступает ночь {game.day_num}.\n\n"
+        f"Мафия и специальные роли делают свой ход.\n"
+        f"Утром используй /mafia_day"
     )
 
 @dp.message_handler(is_allowed_chat, commands=['mafia_stop'])
