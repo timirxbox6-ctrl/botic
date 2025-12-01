@@ -13,7 +13,7 @@ from aiogram import Bot, Dispatcher, executor, types
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram_calendar import SimpleCalendar, simple_cal_callback
+from aiogram_calendar import simple_cal_callback, SimpleCalendar
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -215,7 +215,7 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
             "Формулы пиши обычными символами Unicode: используй ², ³ для степеней, √ для корня. "
             "Например: c² = a² + b², D = b² − 4ac, x = (−b ± √D) / 2a "
             "На простые вопросы типа привет отвечай кратко одним предложением. "
-            "Будь веселым"
+            "будь веселым"
         )
         
         if is_school_task:
@@ -260,7 +260,7 @@ async def ask_perplexity(question: str, is_school_task: bool = False, photo_base
             "messages": messages,
             "temperature": 0.2,
             "top_p": 0.9,
-            "max_tokens": 2000,
+            "max_tokens": 4000,
             "search_recency_filter": "month",
             "return_images": False,
             "return_related_questions": False,
@@ -341,8 +341,7 @@ async def process_title(message: types.Message, state: FSMContext):
 
 @dp.callback_query_handler(simple_cal_callback.filter(), state=EventStates.waiting_for_date)
 async def process_date(callback_query: types.CallbackQuery, callback_data: dict, state: FSMContext):
-    calendar = SimpleCalendar()
-    selected, date = await calendar.process_selection(callback_query, callback_data)
+    selected, date = await SimpleCalendar().process_selection(callback_query, callback_data)
     
     if selected:
         await state.update_data(event_date=date.strftime('%Y-%m-%d'))
@@ -414,7 +413,7 @@ async def process_description(message: types.Message, state: FSMContext):
         google_event_id=google_event_id
     )
     
-    calendar_status = "Добавлено в календарь" if google_event_id else "Сохранено только в боте"
+    calendar_status = "Добавлено в эвенты" if google_event_id else "Сохранено только в боте"
     
     await message.answer(
         f"Событие создано\n\n"
