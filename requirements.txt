@@ -1,5 +1,6 @@
 aiogram==2.25.1
-aiogram-calendar==0.6.0
+aiohttp
+aiogram_calendar==0.1.1
 google-api-python-client==2.108.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.0
